@@ -34,7 +34,9 @@ import { CustomerDisplayManager } from "../components/CustomerDisplayManager";
 import { usePOSReadyGate } from "../hooks/usePOSReadyGate";
 import { socket } from "../constants/socket";
 import { useOfflineSync } from "../hooks/useOfflineSync";
-import { getApiUrl, onApiUrlChange } from "../constants/Config";
+import { API_URL, getApiUrl, onApiUrlChange } from "../constants/Config";
+import { useGlobalSocketSync } from "@/hooks/useGlobalSocketSync";
+import { setApiUrl } from "@/stores/paymentSettingsStore";
 
 // ── Offline Tablet Sync: Auto-syncs SQLite orders to Counter PC ──
 function OfflineSyncRunner() {
@@ -293,9 +295,6 @@ SystemUI.setBackgroundColorAsync(Theme.bgMain);
 // Keep the splash screen visible while fonts load
 SplashScreen.preventAutoHideAsync();
 
-import { useGlobalSocketSync } from "@/hooks/useGlobalSocketSync";
-import { API_URL, getApiUrl, onApiUrlChange } from "@/constants/Config";
-import { setApiUrl } from "@/stores/paymentSettingsStore";
 
 // 🔗 Sync the shared customer-display package's API_URL with the frontend's runtime URL
 setApiUrl(getApiUrl());

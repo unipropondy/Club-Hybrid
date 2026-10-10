@@ -403,7 +403,29 @@ async function pullMasterFromCloud(ioInstance = null) {
         `).catch(() => {});
     }
 
-    console.log(`✅ [CloudSync] Master data pull complete (${remoteDishes.recordset.length} dishes synced).`);
+    // 4. Pull TableMaster (Tables configured in Central Cloud ERP)
+    const remoteTables = await remotePool.request().query(`
+      SELECT TableId, TableNumber, DiningSection, Pax, IsActive, TableName FROM TableMaster WITH (NOLOCK)
+    `).catch(() => ({ recordset: [] }));
+
+    for (const t of remoteTables.recordset) {
+      await localPool.request()
+        .input("id", sql.UniqueIdentifier, t.TableId)
+        .input("num", sql.VarChar(20), t.TableNumber)
+        .input("sec", sql.Int, t.DiningSection || 1)
+        .input("pax", sql.Int, t.Pax || 4)
+        .input("active", sql.Bit, t.IsActive ? 1 : 0)
+        .input("name", sql.NVarChar(50), t.TableName || t.TableNumber)
+        .query(`
+          IF EXISTS (SELECT 1 FROM TableMaster WHERE TableId = @id)
+            UPDATE TableMaster SET TableNumber = @num, DiningSection = @sec, Pax = @pax, IsActive = @active, TableName = @name WHERE TableId = @id
+          ELSE
+            INSERT INTO TableMaster (TableId, TableNumber, DiningSection, Pax, IsActive, TableName, Status)
+            VALUES (@id, @num, @sec, @pax, @active, @name, 0)
+        `).catch(() => {});
+    }
+
+    console.log(`✅ [CloudSync] Master data pull complete (${remoteDishes.recordset.length} dishes, ${remoteTables.recordset.length} tables synced).`);
 
     if (ioInstance) {
       ioInstance.emit("master_data_updated", {

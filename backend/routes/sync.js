@@ -96,6 +96,26 @@ router.post("/push", async (req, res) => {
         )
       `);
 
+      // 2.5 Update TableMaster so table turns occupied in local POS grid
+      const cleanTableNo = safeTableNo.replace(/^Table\s*/i, '').trim();
+      if (cleanTableNo && !safeTableNo.startsWith("TW")) {
+        const tableReq = new sql.Request(transaction);
+        tableReq.input("tblNo", sql.VarChar(20), cleanTableNo);
+        tableReq.input("orderNo", sql.VarChar(20), safeOrderNo);
+        tableReq.input("total", sql.Decimal(18, 2), parseFloat(order.total_amount) || 0);
+        tableReq.input("custName", sql.NVarChar(9), safeCustomerName);
+        await tableReq.query(`
+          UPDATE TableMaster 
+          SET Status = 2, 
+              CurrentOrderId = @orderNo, 
+              TotalAmount = @total,
+              CustomerName = @custName,
+              StartTime = ISNULL(StartTime, GETDATE()), 
+              ModifiedOn = GETDATE()
+          WHERE (LTRIM(RTRIM(TableNumber)) = @tblNo OR CONVERT(VARCHAR(50), TableId) = @tblNo)
+        `).catch((tErr) => console.warn("TableMaster update warning:", tErr.message));
+      }
+
       // 3. Insert Order Items into RestaurantOrderDetailCur
       if (items && Array.isArray(items)) {
         for (const lineItem of items) {
