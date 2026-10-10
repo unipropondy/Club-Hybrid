@@ -1,0 +1,23 @@
+{
+  "storeId": "STORE_001",
+  "bridgeToken": "unipro-pos-bridge-token-2026",
+  "pollIntervalMs": 500,
+  "port": 3050,
+  "backends": [
+    {
+      "name": "Local Offline POS",
+      "url": "http://localhost:5000",
+      "enabled": true
+    },
+    {
+      "name": "Cloud Backup POS",
+      "url": "https://clubdemo2026july-production.up.railway.app",
+      "enabled": false
+    }
+  ],
+  "customerDisplay": {
+    "enabled": true,
+    "fullscreen": true,
+    "autoRecovery": true
+  }
+}
