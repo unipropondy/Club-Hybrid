@@ -90,6 +90,11 @@ function resolveStationPrefix(req) {
     const waiterCode = (req?.user?.userCode || req?.body?.waiterCode || "").trim().toUpperCase();
     return waiterCode ? `W${waiterCode.slice(0, 2)}` : "W1";
   }
+  // 📱 TABLET AS COUNTER: Pick up terminal code directly from app header/body
+  const clientTerminal = (req?.headers?.["x-terminal-code"] || req?.body?.terminalCode || req?.headers?.["x-station-prefix"] || req?.body?.stationPrefix || "").trim().toUpperCase();
+  if (clientTerminal) {
+    return clientTerminal.slice(0, 4);
+  }
   return process.env.STATION_PREFIX || "POS";
 }
 

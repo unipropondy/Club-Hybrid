@@ -37,6 +37,7 @@ import { useOfflineSync } from "../hooks/useOfflineSync";
 import { API_URL, getApiUrl, onApiUrlChange } from "../constants/Config";
 import { useGlobalSocketSync } from "@/hooks/useGlobalSocketSync";
 import { setApiUrl } from "@/stores/paymentSettingsStore";
+import { useTerminalStore } from "@/stores/terminalStore";
 
 // ── Offline Tablet Sync: Auto-syncs SQLite orders to Counter PC ──
 function OfflineSyncRunner() {
@@ -401,6 +402,11 @@ global.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Pr
     const token = useAuthStore.getState().token;
     if (token && !headers['Authorization'] && !headers['authorization']) {
       headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const terminalCode = useTerminalStore.getState().terminalCode;
+    if (terminalCode) {
+      headers['x-terminal-code'] = terminalCode;
     }
 
     const requestId = headers['x-request-id'] || headers['X-Request-ID'] || getUUID();

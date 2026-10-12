@@ -38,9 +38,19 @@ const remoteConfig = {
   },
 };
 
+let localServer = (process.env.LOCAL_DB_SERVER || "localhost\\ups").trim();
+let localInstance = undefined;
+if (localServer.includes("\\") || localServer.includes("/")) {
+  const parts = localServer.split(/[\\/]+/).filter(Boolean);
+  localServer = parts[0] || "localhost";
+  localInstance = parts[1];
+}
+if (localServer === "." || localServer === "(local)") {
+  localServer = "localhost";
+}
+
 const localConfig = {
-  server: process.env.LOCAL_DB_SERVER || "localhost",
-  port: parseInt(process.env.LOCAL_DB_PORT || "1433"),
+  server: localServer,
   database: process.env.LOCAL_DB_NAME || "UCSCLUB",
   user: process.env.LOCAL_DB_USER || "sa",
   password: process.env.LOCAL_DB_PASSWORD || "Unipro@2026",
@@ -48,7 +58,9 @@ const localConfig = {
     encrypt: false,
     trustServerCertificate: true,
     enableArithAbort: true,
+    ...(localInstance ? { instanceName: localInstance } : {}),
   },
+  ...(!localInstance && process.env.LOCAL_DB_PORT ? { port: parseInt(process.env.LOCAL_DB_PORT) } : {}),
   connectionTimeout: 15000,
   requestTimeout: 120000,
   pool: {

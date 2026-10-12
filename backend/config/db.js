@@ -8,10 +8,14 @@ function buildConfig({ server, port, database, user, password }, useInstance = t
   let serverName = server.trim();
   let instanceName = undefined;
 
-  if (serverName.includes("\\")) {
-    const parts = serverName.split("\\");
-    serverName = parts[0];
+  if (serverName.includes("\\") || serverName.includes("/")) {
+    const parts = serverName.split(/[\\/]+/).filter(Boolean);
+    serverName = parts[0] || "localhost";
     instanceName = parts[1];
+  }
+
+  if (serverName === "." || serverName === "(local)") {
+    serverName = "localhost";
   }
 
   const configObj = {

@@ -1965,7 +1965,7 @@ router.post("/save", async (req, res) => {
           ? "ERP"
           : req?.body?.orderSource === "QR"
             ? "QR"
-            : (process.env.STATION_PREFIX || "POS");
+            : (req?.headers?.["x-terminal-code"] || req?.body?.terminalCode || req?.headers?.["x-station-prefix"] || req?.body?.stationPrefix || process.env.STATION_PREFIX || "POS").trim().toUpperCase().slice(0, 4);
         displayOrderId = `${stationPrefix}-${todayStr.replace(/-/g, '')}-${String(dailySequence).padStart(4, '0')}`;
         console.log(`[SAVE SALE] Generated NEW ID: ${displayOrderId}`);
     } else {
