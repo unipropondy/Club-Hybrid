@@ -9,7 +9,7 @@ import { API_URL } from "../constants/Config";
 import { formatToSingaporeDate, formatToSingaporeTime, formatToSingaporeDateTime } from "../utils/timezoneHelper";
 import BillPDFGenerator from "./BillPDFGenerator";
 import { PrinterDetector } from "./PrinterDetector";
-import SunmiPrinterService from "./SunmiPrinterService";
+import SunmiPrinterService, { SunmiPrinterManager } from "./SunmiPrinterService";
 import { useCompanySettingsStore } from "../stores/companySettingsStore";
 import { useGeneralSettingsStore } from "../stores/generalSettingsStore";
 import { useCartStore } from "../stores/cartStore";
@@ -1247,10 +1247,12 @@ class UniversalPrinter {
         // Try bridge directly — skip pre-flight isBridgeOnline() check which can falsely report offline
 
         const company = await BillPDFGenerator.loadSettings(outletId);
+        const colWidth = this.getAutoColWidth();
         const text = this.formatThermalTextWithDiscount(
           saleData,
           company,
           discountInfo,
+          colWidth,
         );
         const isTakeaway =
           !saleData.tableNo ||
@@ -1329,7 +1331,8 @@ class UniversalPrinter {
           if (isBridge) {
             try {
               console.log(`📡 [Print Bridge] Queueing receipt to Print Bridge for: ${targetIp}`);
-              const text = this.formatThermalTextWithDiscount(saleData, company, discountInfo);
+              const colWidth = this.getAutoColWidth(targetIp);
+              const text = this.formatThermalTextWithDiscount(saleData, company, discountInfo, colWidth);
               const pType = isTakeaway ? 3 : 1;
               const success = await this.queuePrintJob(pType, undefined, text, targetIp);
               if (success) return;
@@ -1538,6 +1541,38 @@ class UniversalPrinter {
   }
 
 
+  public static getAutoColWidth(targetAddress?: string, printer?: PrinterInfo): number {
+    // 1. Explicit paper size preference on printer object
+    if (printer?.paperSize === "58mm") return 32;
+    if (printer?.paperSize === "80mm") return 48;
+
+    // 2. Intelligent prediction from printer name or address descriptor
+    const descriptor = `${(printer as any)?.PrinterName || ''} ${(printer as any)?.name || ''} ${targetAddress || ''}`.toLowerCase();
+    if (descriptor.includes("58mm") || descriptor.includes("pos-58") || descriptor.includes("pos58") || /\b58\b/.test(descriptor)) {
+      return 32;
+    }
+    if (descriptor.includes("80mm") || descriptor.includes("pos-80") || descriptor.includes("pos80") || descriptor.includes("td80") || /\b80\b/.test(descriptor)) {
+      return 48;
+    }
+
+    // 3. External printer configured (LAN IP, Bluetooth, or Windows Print Bridge) -> standard POS 80mm
+    if (targetAddress && targetAddress.trim().length > 0) {
+      return 48;
+    }
+
+    // 4. Built-in device printer (e.g. Sunmi built-in handheld vs desktop terminal)
+    if (Platform.OS === "android") {
+      try {
+        const sunmiSize = SunmiPrinterManager.getPaperSize();
+        if (sunmiSize === "58mm") return 32;
+        if (sunmiSize === "80mm") return 48;
+      } catch (_) {}
+    }
+
+    // Default standard for POS thermal receipt printers: 80mm (48 columns)
+    return 48;
+  }
+
   // ==================== NETWORK PRINTING ====================
   private static async printNetwork(
     saleData: any,
@@ -1551,7 +1586,7 @@ class UniversalPrinter {
       if (!targetAddress) return false;
 
       const isIp = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(targetAddress);
-      const colWidth = isIp || printer?.paperSize === "80mm" ? 48 : 32;
+      const colWidth = this.getAutoColWidth(targetAddress, printer);
 
       let text = this.formatThermalTextWithDiscount(
         saleData,
@@ -1598,7 +1633,7 @@ class UniversalPrinter {
     }
   }
 
-  private static formatTwoCols(left: any, right: any, totalWidth: number = 32): string {
+  private static formatTwoCols(left: any, right: any, totalWidth: number = 48): string {
     const rawLeft = String(left || "");
     const rawRight = String(right || "");
 
@@ -1620,15 +1655,16 @@ class UniversalPrinter {
     saleData: any,
     company: any,
     discountInfo?: DiscountInfo,
-    colWidth: number = 32,
+    colWidth?: number,
   ): string {
+    const effectiveWidth = colWidth || this.getAutoColWidth(company?.printerIp);
     const symbol = company.currencySymbol || "$";
     const isCheckout = !!saleData.isCheckout;
     const companySettings = useCompanySettingsStore.getState().settings;
     const takeawayRate = companySettings?.takeawayCharges || 0;
 
-    const lineEq = "[C]" + "=".repeat(colWidth) + "\n";
-    const lineDash = "[L]" + "-".repeat(colWidth) + "\n";
+    const lineEq = "[C]" + "=".repeat(effectiveWidth) + "\n";
+    const lineDash = "[L]" + "-".repeat(effectiveWidth) + "\n";
 
     let text = lineEq;
     if (isCheckout) {
@@ -1671,12 +1707,13 @@ class UniversalPrinter {
     }
     text += lineDash;
 
-    // Items Header - Adopt Sunmi 58mm column layout (12 ITEM, 3 QTY, 7 PRICE, 10 TOTAL = 32 cols)
-    if (colWidth === 32) {
+    // Items Header - Adopt column layout (48 cols for 80mm, 32 cols for 58mm)
+    if (effectiveWidth === 32) {
       const itemH = "ITEM".padEnd(12, " ") + "QTY".padStart(3, " ") + "PRICE".padStart(7, " ") + "TOTAL".padStart(10, " ");
       text += `[L]${itemH}\n`;
     } else {
-      text += "[L]ITEM                        QTY   PRICE    TOTAL\n";
+      const itemH = "ITEM".padEnd(24, " ") + "QTY".padStart(4, " ") + "PRICE".padStart(10, " ") + "TOTAL".padStart(10, " ");
+      text += `[L]${itemH}\n`;
     }
     text += lineDash;
 
@@ -1705,7 +1742,7 @@ class UniversalPrinter {
       const totalNum = priceNum * qtyNum;
       const total = `${symbol}${totalNum.toFixed(2)}`;
 
-      if (colWidth === 32) {
+      if (effectiveWidth === 32) {
         // Sunmi 58mm PrintFormatter Column Math (32 cols max)
         const nameWidth = 12;
         const qtyWidth = 3;
@@ -1728,13 +1765,13 @@ class UniversalPrinter {
         }
       } else {
         // 48-column layout (80mm)
-        const name48 = fullName.substring(0, 26).padEnd(26);
-        const qty48 = qty.padStart(5);
-        const price48 = price.padStart(8);
-        const total48 = total.padStart(9);
+        const name48 = fullName.substring(0, 24).padEnd(24);
+        const qty48 = qty.padStart(4);
+        const price48 = price.padStart(10);
+        const total48 = total.padStart(10);
         text += `[L]${name48}${qty48}${price48}${total48}\n`;
-        if (fullName.length > 26) {
-          text += `[L]   ${fullName.substring(26)}\n`;
+        if (fullName.length > 24) {
+          text += `[L]   ${fullName.substring(24)}\n`;
         }
       }
 
@@ -1853,10 +1890,10 @@ class UniversalPrinter {
     const hasAnyDiscount = totalItemDiscount > 0 || orderDiscount > 0 || totalVipDiscount > 0;
     let currentSubtotal = grossTotal;
 
-    text += this.formatTwoCols("Sub Total:", `${symbol}${grossTotal.toFixed(2)}`, colWidth);
+    text += this.formatTwoCols("Sub Total:", `${symbol}${grossTotal.toFixed(2)}`, effectiveWidth);
 
     if (totalItemDiscount > 0) {
-      text += this.formatTwoCols("Item Discounts:", `-${symbol}${totalItemDiscount.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols("Item Discounts:", `-${symbol}${totalItemDiscount.toFixed(2)}`, effectiveWidth);
       currentSubtotal -= totalItemDiscount;
     }
 
@@ -1865,12 +1902,12 @@ class UniversalPrinter {
         finalDiscountInfo?.type === "percentage"
           ? `Discount (${finalDiscountInfo.value}%):`
           : "Discount:";
-      text += this.formatTwoCols(discLabel, `-${symbol}${orderDiscount.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols(discLabel, `-${symbol}${orderDiscount.toFixed(2)}`, effectiveWidth);
       currentSubtotal -= orderDiscount;
     }
 
     if (totalVipDiscount > 0) {
-      text += this.formatTwoCols("VIP Discount Savings:", `-${symbol}${totalVipDiscount.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols("VIP Discount Savings:", `-${symbol}${totalVipDiscount.toFixed(2)}`, effectiveWidth);
       currentSubtotal -= totalVipDiscount;
     }
 
@@ -1878,7 +1915,7 @@ class UniversalPrinter {
 
     if (hasAnyDiscount) {
       text += lineDash;
-      text += this.formatTwoCols("Net Amount:", `${symbol}${currentSubtotal.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols("Net Amount:", `${symbol}${currentSubtotal.toFixed(2)}`, effectiveWidth);
     }
 
     let finalTotal = saleData.total || saleData.totalAmount || currentSubtotal;
@@ -1960,8 +1997,9 @@ class UniversalPrinter {
     const gstAmountRaw = hasGST ? taxableAmount * (gstRate / 100) : 0;
     const gstAmount = Math.round(gstAmountRaw * 100) / 100;
     
-    if (finalTotal === 0) {
-      finalTotal = taxableAmount + gstAmount;
+    // On checkout bills, bill total is strictly the sum of taxable amount + GST
+    if (isCheckout || finalTotal === 0) {
+      finalTotal = Math.round((taxableAmount + gstAmount) * 100) / 100;
     }
 
     const storedRoundOff = saleData.roundOff !== undefined && saleData.roundOff !== null
@@ -1970,27 +2008,27 @@ class UniversalPrinter {
     const computedDifference = parseFloat((finalTotal - (taxableAmount + gstAmount)).toFixed(2));
     const printedRoundOff = (storedRoundOff !== null && !isNaN(storedRoundOff) && storedRoundOff !== 0)
       ? storedRoundOff
-      : (Math.abs(computedDifference) >= 0.01 ? computedDifference : 0);
+      : (!isCheckout && Math.abs(computedDifference) >= 0.01 ? computedDifference : 0);
 
     if (hasSC) {
-      text += this.formatTwoCols(allItemsHaveSC ? "Service Charge:" : "Item Service Charge:", `${symbol}${serviceChargeAmount.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols(allItemsHaveSC ? "Service Charge:" : "Item Service Charge:", `${symbol}${serviceChargeAmount.toFixed(2)}`, effectiveWidth);
     }
 
     if (globalTakeawayCharge > 0) {
-      text += this.formatTwoCols(`Takeaway Charges (${symbol}${takeawayRate.toFixed(2)}*${globalTakeawayQty}):`, `${symbol}${globalTakeawayCharge.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols(`Takeaway Charges (${symbol}${takeawayRate.toFixed(2)}*${globalTakeawayQty}):`, `${symbol}${globalTakeawayCharge.toFixed(2)}`, effectiveWidth);
     }
     if (specificTakeawayCharge > 0) {
-      text += this.formatTwoCols(`Takeaway Charges (Item-wise):`, `${symbol}${specificTakeawayCharge.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols(`Takeaway Charges (Item-wise):`, `${symbol}${specificTakeawayCharge.toFixed(2)}`, effectiveWidth);
     }
 
     if (hasGST && gstAmount > 0) {
-      text += this.formatTwoCols(`GST (${gstRate}%):`, `${symbol}${gstAmount.toFixed(2)}`, colWidth);
+      text += this.formatTwoCols(`GST (${gstRate}%):`, `${symbol}${gstAmount.toFixed(2)}`, effectiveWidth);
       text += lineDash;
     }
 
     if (printedRoundOff && printedRoundOff !== 0) {
       const roSign = printedRoundOff > 0 ? "+" : (printedRoundOff < 0 ? "-" : "");
-      text += this.formatTwoCols("Round Off:", `${roSign}${symbol}${Math.abs(printedRoundOff).toFixed(2)}`, colWidth);
+      text += this.formatTwoCols("Round Off:", `${roSign}${symbol}${Math.abs(printedRoundOff).toFixed(2)}`, effectiveWidth);
       text += lineDash;
     }
 
@@ -2000,24 +2038,24 @@ class UniversalPrinter {
       saleData.payments.forEach((p: any) => {
         const modeLabel = `  ${String(p.payMode || p.payModeName || p.Remarks || "Payment")}`;
         const amountVal = `${symbol}${parseFloat(p.amount).toFixed(2)}`;
-        text += this.formatTwoCols(modeLabel, amountVal, colWidth);
+        text += this.formatTwoCols(modeLabel, amountVal, effectiveWidth);
       });
       text += lineDash;
     } else {
       const methodLabel = `  ${String(saleData.paymentMethod || "Payment")}`;
       const amountVal = `${symbol}${parseFloat(finalTotal).toFixed(2)}`;
-      text += this.formatTwoCols(methodLabel, amountVal, colWidth);
+      text += this.formatTwoCols(methodLabel, amountVal, effectiveWidth);
       text += lineDash;
     }
 
-    text += this.formatTwoCols("TOTAL:", `${symbol}${finalTotal.toFixed(2)}`, colWidth);
+    text += this.formatTwoCols("TOTAL:", `${symbol}${finalTotal.toFixed(2)}`, effectiveWidth);
 
     // Reward points summary
     if (saleData.rewardPointsEarned && parseFloat(String(saleData.rewardPointsEarned)) > 0) {
       text += lineDash;
-      text += this.formatTwoCols("Reward Points Earned:", `+${symbol}${parseFloat(String(saleData.rewardPointsEarned)).toFixed(2)}`, colWidth);
+      text += this.formatTwoCols("Reward Points Earned:", `+${symbol}${parseFloat(String(saleData.rewardPointsEarned)).toFixed(2)}`, effectiveWidth);
       if (saleData.memberRewardBalance && parseFloat(String(saleData.memberRewardBalance)) > 0) {
-        text += this.formatTwoCols("Available Member Credit:", `${symbol}${parseFloat(String(saleData.memberRewardBalance)).toFixed(2)}`, colWidth);
+        text += this.formatTwoCols("Available Member Credit:", `${symbol}${parseFloat(String(saleData.memberRewardBalance)).toFixed(2)}`, effectiveWidth);
       }
     }
 

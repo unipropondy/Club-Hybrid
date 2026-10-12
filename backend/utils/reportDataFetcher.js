@@ -15,7 +15,17 @@ const normalizePayMode = (paymentMethod = "CASH") => {
   // MUST check cashbox BEFORE cash — 'CASH BOX ENTRY'.includes('CASH') is true!
   if (raw === "CASHBOX" || raw === "CASH BOX" || raw === "CASH BOX ENTRY") return "CASH BOX ENTRY";
   if (raw === "CASH" || raw === "CAS" || raw === "1") return "CASH";
-  if (raw.includes("CARD") || raw.includes("VISA") || raw.includes("MASTER") || raw.includes("AMEX") || raw.includes("DINERS")) return "CARD";
+
+  const rawClean = raw.replace(/[\s\-_]/g, "");
+  if (rawClean.includes("YEAHPAYCARD") || raw === "8") return "YEAHPAY CARD";
+  if (rawClean.includes("YEAHPAYPAYNOW") || rawClean.includes("YEAHPAYQR") || raw === "7") return "YEAHPAY PAYNOW";
+  if (raw.startsWith("YEAHPAY")) {
+    if (raw.includes("CARD")) return "YEAHPAY CARD";
+    if (raw.includes("PAYNOW") || raw.includes("QR")) return "YEAHPAY PAYNOW";
+    return "YEAHPAY CARD";
+  }
+
+  if (raw.includes("CARD") || raw.includes("VISA") || raw.includes("MASTER") || raw.includes("AMEX") || raw.includes("DINERS") || raw === "9") return "CARD";
   if (raw.includes("PAYNOW") || raw.includes("GRAB") || raw.includes("FOODPANDA") || raw === "3" || raw.includes("PAY NOW")) return "PAYNOW";
   if (raw.includes("UPI") || raw === "4" || raw.includes("GPAY") || raw.includes("PHONE") || raw.includes("PAYTM")) return "UPI";
   if (raw.includes("NETS") || raw === "2") return "NETS";

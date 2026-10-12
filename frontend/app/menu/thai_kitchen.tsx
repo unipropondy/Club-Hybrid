@@ -45,6 +45,8 @@ import { useGeneralSettingsStore } from "../../stores/generalSettingsStore";
 import { useMenuStore } from "../../stores/menuStore";
 import { useOrderContextStore } from "../../stores/orderContextStore";
 import { usePaymentSettingsStore } from "../../stores/paymentSettingsStore";
+import { useCompanySettingsStore } from "../../stores/companySettingsStore";
+import { useServiceChargeOverrideStore } from "../../stores/serviceChargeOverrideStore";
 import { useTableNavigationStore } from "../../stores/tableNavigationStore";
 import { useBarcodeScanner } from "../../hooks/useBarcodeScanner";
 
@@ -604,28 +606,103 @@ export default function MenuScreen() {
     }
 
     try {
-      const cart = useCartStore.getState().carts[currentContextId!] || [];
+      const companySettings = useCompanySettingsStore.getState().settings;
+      const gstRate = (companySettings.gstPercentage || 0) / 100;
+      const scRate = (companySettings.serviceChargePercentage || 0) / 100;
+      const takeawayRate = companySettings.takeawayCharges || 0;
+
       const discountInfo = useCartStore.getState().discounts[
         currentContextId!
       ] || { applied: false, type: "fixed", value: 0 };
 
-      const subtotal = cart.reduce((sum: number, item: any) => {
-        if (item.status === "VOIDED") return sum;
-        return sum + (item.price || 0) * item.qty;
-      }, 0);
+      let grossTotal = 0;
+      let totalItemDiscount = 0;
+      let scEligibleSubtotal = 0;
+      let globalTakeawayChargeAmt = 0;
+      let specificTakeawayChargeAmt = 0;
 
-      const discAmt = discountInfo.applied
-        ? discountInfo.type === "percentage"
-          ? (subtotal * discountInfo.value) / 100
-          : discountInfo.value
-        : 0;
+      const activeItems = cart.filter(
+        (item: any) => item.status !== "VOIDED" && item.statusCode !== 0,
+      );
 
-      const gstAmt = subtotal * ((paymentSettings.gstPercentage || 0) / 100);
-      const total = subtotal - discAmt + gstAmt;
+      activeItems.forEach((item: any) => {
+        const qtyNum = parseFloat(String(item.qty || item.quantity || 1)) || 1;
+        const isCombo = item.isCombo === true || String(item.isCombo) === "1" || item.isCombo === 1;
+        const discountBasis = isCombo ? (item.basePrice ?? item.price ?? 0) : (item.price ?? 0);
+        const baseTotal = (item.price || 0) * qtyNum;
+
+        let itemDiscount = 0;
+        const discAmt = Number(item.discountAmount ?? item.discount ?? 0);
+        const discType = item.discountType || "percentage";
+        if (discAmt > 0) {
+          if (discType === "percentage") {
+            itemDiscount = (discountBasis * (discAmt / 100)) * qtyNum;
+          } else {
+            itemDiscount = Math.min(discAmt, discountBasis) * qtyNum;
+          }
+        }
+        itemDiscount = Math.round(itemDiscount * 100) / 100;
+
+        grossTotal += baseTotal;
+        totalItemDiscount += itemDiscount;
+
+        const itemSubtotal = baseTotal - itemDiscount;
+        const isTakeawayItem = item.isTakeaway || item.IsTakeaway || item.isTakeAway || item.IsTakeAway;
+        const isSC = !isTakeawayItem && (Number(item.isServiceCharge) === 1 || item.isServiceCharge === true);
+        if (isSC) {
+          scEligibleSubtotal += itemSubtotal;
+        }
+
+        if (isTakeawayItem) {
+          const rate = item.TakeawayCharge !== null && item.TakeawayCharge !== undefined ? parseFloat(String(item.TakeawayCharge)) : null;
+          const hasSpecific = rate !== null && !isNaN(rate) && rate > 0;
+          const isSpecific = hasSpecific && rate !== takeawayRate;
+          const dishTWRate = hasSpecific ? rate : takeawayRate;
+          const itemTWCharge = dishTWRate > 0 ? qtyNum * dishTWRate : 0;
+          if (isSpecific) {
+            specificTakeawayChargeAmt += itemTWCharge;
+          } else {
+            globalTakeawayChargeAmt += itemTWCharge;
+          }
+        }
+      });
+
+      const subtotal = grossTotal - totalItemDiscount;
+
+      let billDiscount = 0;
+      if (discountInfo.applied) {
+        if (discountInfo.type === "percentage") {
+          billDiscount = (subtotal * discountInfo.value) / 100;
+        } else {
+          billDiscount = Math.min(discountInfo.value, subtotal);
+        }
+      }
+      billDiscount = Math.round(billDiscount * 100) / 100;
+
+      const netAfterDiscount = subtotal - billDiscount;
+
+      // Pro-rate bill discount to service charge eligible items
+      let scEligibleNet = scEligibleSubtotal;
+      if (subtotal > 0 && billDiscount > 0) {
+        const proportion = scEligibleSubtotal / subtotal;
+        scEligibleNet = Math.max(0, scEligibleSubtotal - proportion * billDiscount);
+      }
+
+      const isScReduced = displayOrderId
+        ? !!useServiceChargeOverrideStore.getState().overrides[displayOrderId.toLowerCase()]
+        : false;
+      const serviceChargeAmount = isScReduced
+        ? 0
+        : Math.round(scEligibleNet * scRate * 100) / 100;
+      const currentTakeawayCharge = globalTakeawayChargeAmt + specificTakeawayChargeAmt;
+
+      const taxableAmount = netAfterDiscount + serviceChargeAmount + currentTakeawayCharge;
+      const gstAmountRaw = taxableAmount * gstRate;
+      const grandTotal = Math.round((taxableAmount + gstAmountRaw) * 100) / 100;
 
       const saleData = {
         items: cart,
-        total: total,
+        total: grandTotal,
         subtotal: subtotal,
         discount: discountInfo,
         orderId: displayOrderId,
@@ -633,6 +710,8 @@ export default function MenuScreen() {
         waiterName: orderContext?.serverName,
         date: new Date(),
         isCheckout: true,
+        serviceCharge: serviceChargeAmount,
+        takeawayCharge: currentTakeawayCharge,
       };
 
       await UniversalPrinter.printCheckoutBill(
@@ -640,7 +719,7 @@ export default function MenuScreen() {
         user?.userId || "SYSTEM",
         {
           ...discountInfo,
-          amount: discAmt,
+          amount: billDiscount,
         },
       );
 

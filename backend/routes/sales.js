@@ -175,9 +175,17 @@ const normalizePayMode = (paymentMethod = "CASH") => {
   if (raw === "P-H-O-N-E") return "PHONE";
   if (raw === "P-A-Y-T-M") return "PAYTM";
   if (raw.includes("CASH") || raw === "CAS") return "CASH";
-  if (raw.includes("YEAHPAY PAYNOW") || raw === "YEAHPAY PAYNOW") return "Yeahpay Paynow";
-  if (raw.includes("YEAHPAY CARD") || raw === "YEAHPAY CARD") return "Yeahpay Card";
-  if (raw.includes("CARD") || raw.includes("VISA") || raw.includes("MASTER") || raw.includes("AMEX") || raw.includes("DINERS")) return "CARD";
+
+  const rawClean = raw.replace(/[\s\-_]/g, "");
+  if (rawClean.includes("YEAHPAYCARD") || raw === "8") return "YEAHPAY CARD";
+  if (rawClean.includes("YEAHPAYPAYNOW") || rawClean.includes("YEAHPAYQR") || raw === "7") return "YEAHPAY PAYNOW";
+  if (raw.startsWith("YEAHPAY")) {
+    if (raw.includes("CARD")) return "YEAHPAY CARD";
+    if (raw.includes("PAYNOW") || raw.includes("QR")) return "YEAHPAY PAYNOW";
+    return "YEAHPAY CARD";
+  }
+
+  if (raw.includes("CARD") || raw.includes("VISA") || raw.includes("MASTER") || raw.includes("AMEX") || raw.includes("DINERS") || raw === "9") return "CARD";
   if (raw.includes("PAYNOW") || raw.includes("GRAB") || raw.includes("FOODPANDA")) return "PAYNOW";
   if (raw.includes("UPI") || raw.includes("GPAY") || raw.includes("PHONE") || raw.includes("PAYTM")) return "UPI";
   if (raw.includes("NETS")) return "NETS";
@@ -2016,7 +2024,10 @@ router.post("/save", async (req, res) => {
     console.log(`[SAVE SALE] Merge Count: ${mergeCount || "none"} (child count: ${childCount})`);
 
     const normalizedPayMode = normalizePayMode(paymentMethod);
-    const payModeCode = normalizedPayMode === "CASH" ? 1 : normalizedPayMode === "CARD" ? 2 : 3;
+    const payModeCode = normalizedPayMode === "CASH" ? 1 : 
+                        normalizedPayMode === "CARD" ? 2 : 
+                        normalizedPayMode === "YEAHPAY CARD" ? 8 :
+                        normalizedPayMode === "YEAHPAY PAYNOW" ? 7 : 3;
 
     const headerResult = await transaction.request()
       .input("SettlementID", sql.UniqueIdentifier, settlementId)

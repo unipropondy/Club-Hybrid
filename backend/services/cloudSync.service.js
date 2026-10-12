@@ -24,11 +24,11 @@ async function getRemotePool() {
       encrypt: false,
       trustServerCertificate: true,
       enableArithAbort: true,
-      connectTimeout: 5000,
-      requestTimeout: 25000,
+      connectTimeout: 15000,
+      requestTimeout: 30000,
     },
-    connectionTimeout: 5000,
-    requestTimeout: 25000,
+    connectionTimeout: 15000,
+    requestTimeout: 30000,
     pool: {
       max: 10,
       min: 0,
@@ -51,8 +51,286 @@ async function getRemotePool() {
   }
 }
 
+function safeDate(val) {
+  if (!val) return null;
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 /**
- * Pushes offline settled sales from Local MSSQL to Cloud ERP (myerpcloud.dyndns.org).
+ * Pushes live table status (TableMaster) and active carts (RestaurantOrderCur, RestaurantOrderDetailCur)
+ * to Central Cloud ERP so online POS displays real-time occupancy and cart contents.
+ */
+async function syncLiveTablesAndCarts(remotePool, localPool) {
+  // 1. Fetch Local Table Master
+  const locTablesRes = await localPool.request().query(`
+    SELECT TableId, TableNumber, DiningSection, Status, TotalAmount, 
+           CONVERT(VARCHAR, StartTime, 126) as StartTime, 
+           CurrentOrderId, CustomerName, Pax, entry_status,
+           PAYMENT_STATUS, LockedByName, IsLocked
+    FROM TableMaster WITH (NOLOCK)
+  `);
+  const locTables = locTablesRes.recordset;
+
+  // 2. Sync TableMaster to Remote in a single batch
+  let batchSql = "";
+  const tblReq = remotePool.request();
+  for (let i = 0; i < locTables.length; i++) {
+    const t = locTables[i];
+    const cleanTableNo = String(t.TableNumber || "").trim();
+    const cleanTableId = String(t.TableId || "").trim();
+    tblReq.input(`tid_${i}`, sql.UniqueIdentifier, cleanTableId);
+    tblReq.input(`tno_${i}`, sql.VarChar(20), cleanTableNo);
+    tblReq.input(`status_${i}`, sql.Int, t.Status !== undefined ? t.Status : 0);
+    tblReq.input(`tot_${i}`, sql.Decimal(18, 2), t.TotalAmount || 0);
+    tblReq.input(`startTime_${i}`, sql.DateTime, safeDate(t.StartTime));
+    tblReq.input(`orderId_${i}`, sql.NVarChar(50), t.CurrentOrderId || null);
+    tblReq.input(`custName_${i}`, sql.NVarChar(50), t.CustomerName || null);
+    tblReq.input(`pax_${i}`, sql.Int, t.Pax || null);
+    tblReq.input(`entryStatus_${i}`, sql.NVarChar(10), t.entry_status || null);
+    tblReq.input(`payStatus_${i}`, sql.Int, t.PAYMENT_STATUS || null);
+    tblReq.input(`lockedBy_${i}`, sql.NVarChar(50), t.LockedByName || null);
+
+    batchSql += `
+      UPDATE TableMaster
+      SET Status = @status_${i},
+          TotalAmount = @tot_${i},
+          StartTime = @startTime_${i},
+          CurrentOrderId = @orderId_${i},
+          CustomerName = @custName_${i},
+          Pax = @pax_${i},
+          entry_status = @entryStatus_${i},
+          PAYMENT_STATUS = @payStatus_${i},
+          LockedByName = @lockedBy_${i},
+          ModifiedOn = GETDATE()
+      WHERE TableId = @tid_${i} OR LTRIM(RTRIM(TableNumber)) = @tno_${i};
+    `;
+  }
+  if (batchSql) {
+    await tblReq.query(batchSql);
+  }
+
+  // 3. Helper to fetch remote columns
+  const remoteCols = async (tableName) => {
+    const res = await remotePool.request().query(`
+      SELECT COLUMN_NAME, DATA_TYPE, COLUMNPROPERTY(object_id(TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IsIdentity
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_NAME = '${tableName}'
+    `);
+    return res.recordset.filter(c => c.IsIdentity !== 1);
+  };
+
+  const orderCurCols = await remoteCols("RestaurantOrderCur");
+  const orderDetailCurCols = await remoteCols("RestaurantOrderDetailCur");
+
+  // 4. Fetch Local Open Orders (Active Carts)
+  const locOpenOrdersRes = await localPool.request().query(`
+    SELECT * FROM RestaurantOrderCur WITH (NOLOCK)
+    WHERE (isOrderClosed = 0 OR isOrderClosed IS NULL)
+  `);
+  const locOpenOrders = locOpenOrdersRes.recordset;
+  const openOrderGuids = [];
+
+  for (const ord of locOpenOrders) {
+    const orderGuid = ord.OrderId;
+    const orderNo = ord.OrderNumber;
+    openOrderGuids.push(orderGuid);
+
+    const checkRes = await remotePool.request()
+      .input("oid", sql.UniqueIdentifier, orderGuid)
+      .input("ono", sql.NVarChar(50), orderNo)
+      .query("SELECT TOP 1 OrderId FROM RestaurantOrderCur WITH (NOLOCK) WHERE OrderId = @oid OR OrderNumber = @ono");
+
+    if (checkRes.recordset.length > 0) {
+      const uReq = remotePool.request();
+      uReq.input("oid", sql.UniqueIdentifier, orderGuid);
+      uReq.input("ono", sql.NVarChar(50), orderNo);
+      uReq.input("tot", sql.Decimal(18, 2), ord.TotalAmount || 0);
+      uReq.input("subtot", sql.Decimal(18, 2), ord.TotalLineItemAmount || 0);
+      uReq.input("disc", sql.Decimal(18, 2), ord.TotalDiscountAmount || 0);
+      uReq.input("status", sql.Int, ord.StatusCode || 1);
+      uReq.input("tblNo", sql.VarChar(20), ord.Tableno || "");
+      uReq.input("custName", sql.NVarChar(50), ord.CustomerName || null);
+      uReq.input("pax", sql.Int, ord.Pax || null);
+      uReq.input("dt", sql.DateTime, safeDate(ord.OrderDateTime) || new Date());
+
+      await uReq.query(`
+        UPDATE RestaurantOrderCur
+        SET TotalAmount = @tot,
+            TotalLineItemAmount = @subtot,
+            TotalDiscountAmount = @disc,
+            StatusCode = @status,
+            isOrderClosed = 0,
+            Tableno = @tblNo,
+            CustomerName = @custName,
+            Pax = @pax,
+            OrderDateTime = @dt,
+            ModifiedOn = GETDATE()
+        WHERE OrderId = @oid OR OrderNumber = @ono
+      `);
+    } else {
+      const iReq = remotePool.request();
+      const colNames = [];
+      const paramNames = [];
+      for (const col of orderCurCols) {
+        const val = ord[col.COLUMN_NAME];
+        if (val !== undefined && val !== null) {
+          let paramVal = val;
+          if (["datetime", "date", "smalldatetime"].includes(col.DATA_TYPE)) {
+            paramVal = safeDate(val);
+          }
+          colNames.push(`[${col.COLUMN_NAME}]`);
+          paramNames.push(`@oc_${col.COLUMN_NAME}`);
+          iReq.input(`oc_${col.COLUMN_NAME}`, paramVal);
+        }
+      }
+      if (colNames.length > 0) {
+        await iReq.query(`
+          INSERT INTO RestaurantOrderCur (${colNames.join(", ")})
+          VALUES (${paramNames.join(", ")})
+        `).catch(e => console.warn("OrderCur insert warning:", e.message));
+      }
+    }
+  }
+
+  // 5. Sync Line Items (RestaurantOrderDetailCur) for active orders
+  let itemsSynced = 0;
+  if (openOrderGuids.length > 0) {
+    const openGuidsFormatted = openOrderGuids.map(g => `'${g}'`).join(",");
+    const locItemsRes = await localPool.request().query(`
+      SELECT * FROM RestaurantOrderDetailCur WITH (NOLOCK)
+      WHERE OrderId IN (${openGuidsFormatted})
+        AND StatusCode <> 0
+    `);
+    const locItems = locItemsRes.recordset;
+
+    const itemsByOrder = {};
+    for (const item of locItems) {
+      if (!itemsByOrder[item.OrderId]) itemsByOrder[item.OrderId] = [];
+      itemsByOrder[item.OrderId].push(item);
+    }
+
+    for (const ordId of openOrderGuids) {
+      const activeItemsForOrder = itemsByOrder[ordId] || [];
+      const activeDetailIds = activeItemsForOrder.map(i => `'${i.OrderDetailId}'`);
+
+      for (const item of activeItemsForOrder) {
+        const detId = item.OrderDetailId;
+        const cRes = await remotePool.request()
+          .input("did", sql.UniqueIdentifier, detId)
+          .query("SELECT TOP 1 OrderDetailId FROM RestaurantOrderDetailCur WITH (NOLOCK) WHERE OrderDetailId = @did");
+
+        if (cRes.recordset.length > 0) {
+          const uReq = remotePool.request();
+          uReq.input("did", sql.UniqueIdentifier, detId);
+          uReq.input("qty", sql.Decimal(18, 2), item.Quantity || 1);
+          uReq.input("price", sql.Decimal(18, 2), item.PricePerUnit || 0);
+          uReq.input("actual", sql.Decimal(18, 2), item.ActualAmount || 0);
+          uReq.input("tot", sql.Decimal(18, 2), item.TotalDetailLineAmount || 0);
+          uReq.input("status", sql.Int, item.StatusCode || 1);
+          uReq.input("mods", sql.NVarChar(sql.MAX), item.ModifiersJSON || null);
+          uReq.input("combos", sql.NVarChar(sql.MAX), item.ComboDetailsJSON || null);
+          uReq.input("remarks", sql.NVarChar(500), item.Remarks || null);
+          uReq.input("tw", sql.Bit, item.isTakeAway ? 1 : 0);
+          uReq.input("song", sql.NVarChar(200), item.SongName || null);
+
+          await uReq.query(`
+            UPDATE RestaurantOrderDetailCur
+            SET Quantity = @qty,
+                PricePerUnit = @price,
+                ActualAmount = @actual,
+                TotalDetailLineAmount = @tot,
+                StatusCode = @status,
+                ModifiersJSON = @mods,
+                ComboDetailsJSON = @combos,
+                Remarks = @remarks,
+                isTakeAway = @tw,
+                SongName = @song,
+                isSettlement = 0,
+                ModifiedOn = GETDATE()
+            WHERE OrderDetailId = @did
+          `);
+        } else {
+          const iReq = remotePool.request();
+          const colNames = [];
+          const paramNames = [];
+          for (const col of orderDetailCurCols) {
+            const val = item[col.COLUMN_NAME];
+            if (val !== undefined && val !== null) {
+              let paramVal = val;
+              if (["datetime", "date", "smalldatetime"].includes(col.DATA_TYPE)) {
+                paramVal = safeDate(val);
+              }
+              colNames.push(`[${col.COLUMN_NAME}]`);
+              paramNames.push(`@odc_${col.COLUMN_NAME}`);
+              iReq.input(`odc_${col.COLUMN_NAME}`, paramVal);
+            }
+          }
+          if (colNames.length > 0) {
+            await iReq.query(`
+              INSERT INTO RestaurantOrderDetailCur (${colNames.join(", ")})
+              VALUES (${paramNames.join(", ")})
+            `).catch(e => console.warn("Line item insert warning:", e.message));
+          }
+        }
+        itemsSynced++;
+      }
+
+      // Void any items on remote that were removed locally
+      if (activeDetailIds.length > 0) {
+        await remotePool.request()
+          .input("ordId", sql.UniqueIdentifier, ordId)
+          .query(`
+            UPDATE RestaurantOrderDetailCur
+            SET StatusCode = 0, ModifiedOn = GETDATE()
+            WHERE OrderId = @ordId
+              AND OrderDetailId NOT IN (${activeDetailIds.join(",")})
+              AND StatusCode <> 0
+          `).catch(() => {});
+      }
+    }
+  }
+
+  // 6. Close Remote Orders for Available Tables (Tables with Status = 0)
+  const availableTableNumbers = locTables
+    .filter(t => t.Status === 0 && t.TableNumber)
+    .map(t => `'${String(t.TableNumber).trim()}'`);
+
+  if (availableTableNumbers.length > 0) {
+    await remotePool.request().query(`
+      UPDATE RestaurantOrderCur
+      SET isOrderClosed = 1, ModifiedOn = GETDATE()
+      WHERE (isOrderClosed = 0 OR isOrderClosed IS NULL)
+        AND LTRIM(RTRIM(Tableno)) IN (${availableTableNumbers.join(",")})
+    `).catch(() => {});
+  }
+
+  // Also close remote orders that are closed locally
+  const locClosedOrders = await localPool.request().query(`
+    SELECT TOP 50 OrderNumber FROM RestaurantOrderCur WITH (NOLOCK)
+    WHERE isOrderClosed = 1
+    ORDER BY ModifiedOn DESC
+  `);
+  const closedOrderNos = locClosedOrders.recordset.map(o => `'${o.OrderNumber}'`).filter(Boolean);
+  if (closedOrderNos.length > 0) {
+    await remotePool.request().query(`
+      UPDATE RestaurantOrderCur
+      SET isOrderClosed = 1, ModifiedOn = GETDATE()
+      WHERE OrderNumber IN (${closedOrderNos.join(",")})
+        AND (isOrderClosed = 0 OR isOrderClosed IS NULL)
+    `).catch(() => {});
+  }
+
+  console.log(`✅ [CloudSync] Live tables & active carts synchronized (${locTables.length} tables, ${locOpenOrders.length} open orders, ${itemsSynced} items).`);
+  return {
+    tablesSynced: locTables.length,
+    openOrdersSynced: locOpenOrders.length,
+    itemsSynced,
+  };
+}
+
+/**
+ * Pushes offline settled sales and live table/cart status from Local MSSQL to Cloud ERP (myerpcloud.dyndns.org).
  * Guarantees transactional idempotency using SettlementID & BillNo.
  */
 async function pushSalesToCloud(ioInstance = null) {
@@ -63,10 +341,22 @@ async function pushSalesToCloud(ioInstance = null) {
     localPool = getPool() || (await poolPromise);
     if (!localPool) throw new Error("Local database connection unavailable");
 
-    // 1. Fetch un-uploaded settled bills from local DB
+    // 1. Connect to Central Cloud ERP
+    remotePool = await getRemotePool();
+
+    // 2. Synchronize Live Table Status and In-Progress Carts!
+    let liveSyncResult = { tablesSynced: 0, openOrdersSynced: 0, itemsSynced: 0 };
+    try {
+      liveSyncResult = await syncLiveTablesAndCarts(remotePool, localPool);
+    } catch (liveErr) {
+      console.warn("⚠️ [CloudSync] Live table/cart sync notice:", liveErr.message);
+    }
+
+    // 3. Fetch un-uploaded settled bills from local DB, plus recent bills to ensure full table integrity
     const pendingRes = await localPool.request().query(`
       SELECT * FROM SettlementHeader WITH (NOLOCK)
-      WHERE (isUploadHQ = 0 OR isUploadHQ IS NULL)
+      WHERE ((isUploadHQ = 0 OR isUploadHQ IS NULL)
+         OR (start_date = (SELECT TOP 1 StartDate FROM DateEntry WITH (NOLOCK) ORDER BY CreatedDate DESC)))
         AND BillNo IS NOT NULL
         AND BillNo != ''
       ORDER BY CreatedOn ASC
@@ -74,15 +364,28 @@ async function pushSalesToCloud(ioInstance = null) {
 
     const pendingBills = pendingRes.recordset;
     if (pendingBills.length === 0) {
+      // Update LastCloudSyncTime even if no bills were pending
+      await localPool.request().query(`
+        IF EXISTS (SELECT 1 FROM AppSettings)
+          UPDATE AppSettings SET LastCloudSyncTime = GETDATE()
+      `).catch(() => {});
+
+      if (ioInstance) {
+        ioInstance.emit("cloud_sync_completed", {
+          type: "PUSH",
+          pushedCount: 0,
+          liveSync: liveSyncResult,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
       return {
         success: true,
         pushedCount: 0,
-        message: "All sales records are already synchronized with Cloud ERP.",
+        liveSync: liveSyncResult,
+        message: `Cloud synchronized: ${liveSyncResult.tablesSynced} tables, ${liveSyncResult.openOrdersSynced} active carts, 0 pending bills.`,
       };
     }
-
-    // 2. Connect to Central Cloud ERP
-    remotePool = await getRemotePool();
 
     // Fetch column lists from remote Cloud tables to build precise INSERT statements
     const remoteCols = async (tableName) => {
@@ -97,7 +400,9 @@ async function pushSalesToCloud(ioInstance = null) {
     const headerCols = (await remoteCols("SettlementHeader")).filter((c) => c.IsIdentity !== 1);
     const itemCols = (await remoteCols("SettlementItemDetail")).filter((c) => c.IsIdentity !== 1);
     const invCols = (await remoteCols("RestaurantInvoice")).filter((c) => c.IsIdentity !== 1);
+    const invCurCols = (await remoteCols("RestaurantInvoiceCur")).filter((c) => c.IsIdentity !== 1);
     const payCols = (await remoteCols("PaymentDetail")).filter((c) => c.IsIdentity !== 1);
+    const payCurCols = (await remoteCols("PaymentDetailCur")).filter((c) => c.IsIdentity !== 1);
     const stsCols = (await remoteCols("SettlementTotalSales")).filter((c) => c.IsIdentity !== 1);
     const sddCols = (await remoteCols("SettlementDiscountDetail")).filter((c) => c.IsIdentity !== 1);
 
@@ -169,13 +474,19 @@ async function pushSalesToCloud(ioInstance = null) {
               }
             }
 
-            // 3. Insert RestaurantInvoice
+            // 3. Insert RestaurantInvoice & RestaurantInvoiceCur
             const localInvs = await localPool.request()
               .input("sid", sql.UniqueIdentifier, sid)
-              .query(`SELECT * FROM RestaurantInvoice WITH (NOLOCK) WHERE RestaurantBillId = @sid`);
+              .query(`
+                SELECT * FROM RestaurantInvoiceCur WITH (NOLOCK) WHERE RestaurantBillId = @sid
+                UNION
+                SELECT * FROM RestaurantInvoice WITH (NOLOCK) WHERE RestaurantBillId = @sid
+              `);
 
             for (let j = 0; j < localInvs.recordset.length; j++) {
               const inv = localInvs.recordset[j];
+              
+              // 3a. RestaurantInvoice
               const invReq = new sql.Request(rTx);
               const vColNames = [];
               const vParamNames = [];
@@ -191,17 +502,42 @@ async function pushSalesToCloud(ioInstance = null) {
                 await invReq.query(`
                   INSERT INTO RestaurantInvoice (${vColNames.join(", ")})
                   VALUES (${vParamNames.join(", ")})
-                `);
+                `).catch(() => {});
+              }
+
+              // 3b. RestaurantInvoiceCur
+              const invCurReq = new sql.Request(rTx);
+              const vcColNames = [];
+              const vcParamNames = [];
+              for (const col of invCurCols) {
+                const val = inv[col.COLUMN_NAME];
+                if (val !== undefined) {
+                  vcColNames.push(`[${col.COLUMN_NAME}]`);
+                  vcParamNames.push(`@vc_${j}_${col.COLUMN_NAME}`);
+                  invCurReq.input(`vc_${j}_${col.COLUMN_NAME}`, val);
+                }
+              }
+              if (vcColNames.length > 0) {
+                await invCurReq.query(`
+                  INSERT INTO RestaurantInvoiceCur (${vcColNames.join(", ")})
+                  VALUES (${vcParamNames.join(", ")})
+                `).catch(() => {});
               }
             }
 
-            // 4. Insert PaymentDetail
+            // 4. Insert PaymentDetail & PaymentDetailCur (Ensures paymode & payment breakdown sync to Cloud!)
             const localPays = await localPool.request()
               .input("sid", sql.UniqueIdentifier, sid)
-              .query(`SELECT * FROM PaymentDetail WITH (NOLOCK) WHERE RestaurantBillId = @sid OR SettlementId = @sid`);
+              .query(`
+                SELECT * FROM PaymentDetailCur WITH (NOLOCK) WHERE RestaurantBillId = @sid
+                UNION
+                SELECT * FROM PaymentDetail WITH (NOLOCK) WHERE (RestaurantBillId = @sid OR SettlementId = @sid)
+              `);
 
             for (let k = 0; k < localPays.recordset.length; k++) {
               const pay = localPays.recordset[k];
+              
+              // 4a. Remote PaymentDetail (Ledger/Audit)
               const payReq = new sql.Request(rTx);
               const pColNames = [];
               const pParamNames = [];
@@ -217,7 +553,26 @@ async function pushSalesToCloud(ioInstance = null) {
                 await payReq.query(`
                   INSERT INTO PaymentDetail (${pColNames.join(", ")})
                   VALUES (${pParamNames.join(", ")})
-                `);
+                `).catch(() => {});
+              }
+
+              // 4b. Remote PaymentDetailCur (CRITICAL: Powers Settlement & POS Sales movements!)
+              const payCurReq = new sql.Request(rTx);
+              const pcColNames = [];
+              const pcParamNames = [];
+              for (const col of payCurCols) {
+                const val = pay[col.COLUMN_NAME];
+                if (val !== undefined) {
+                  pcColNames.push(`[${col.COLUMN_NAME}]`);
+                  pcParamNames.push(`@pc_${k}_${col.COLUMN_NAME}`);
+                  payCurReq.input(`pc_${k}_${col.COLUMN_NAME}`, val);
+                }
+              }
+              if (pcColNames.length > 0) {
+                await payCurReq.query(`
+                  INSERT INTO PaymentDetailCur (${pcColNames.join(", ")})
+                  VALUES (${pcParamNames.join(", ")})
+                `).catch(() => {});
               }
             }
 
@@ -278,6 +633,42 @@ async function pushSalesToCloud(ioInstance = null) {
             await rTx.rollback();
             throw rErr;
           }
+        } else {
+          // Bill already exists on Cloud: Ensure PaymentDetailCur and RestaurantInvoiceCur are backfilled if missing
+          const remotePayCheck = await remotePool.request()
+            .input("sid", sql.UniqueIdentifier, sid)
+            .query(`SELECT TOP 1 PaymentId FROM PaymentDetailCur WITH (NOLOCK) WHERE RestaurantBillId = @sid`);
+
+          if (remotePayCheck.recordset.length === 0) {
+            const localPays = await localPool.request()
+              .input("sid", sql.UniqueIdentifier, sid)
+              .query(`
+                SELECT * FROM PaymentDetailCur WITH (NOLOCK) WHERE RestaurantBillId = @sid
+                UNION
+                SELECT * FROM PaymentDetail WITH (NOLOCK) WHERE (RestaurantBillId = @sid OR SettlementId = @sid)
+              `);
+
+            for (let k = 0; k < localPays.recordset.length; k++) {
+              const pay = localPays.recordset[k];
+              const payCurReq = new sql.Request(remotePool);
+              const pcColNames = [];
+              const pcParamNames = [];
+              for (const col of payCurCols) {
+                const val = pay[col.COLUMN_NAME];
+                if (val !== undefined) {
+                  pcColNames.push(`[${col.COLUMN_NAME}]`);
+                  pcParamNames.push(`@pc_${k}_${col.COLUMN_NAME}`);
+                  payCurReq.input(`pc_${k}_${col.COLUMN_NAME}`, val);
+                }
+              }
+              if (pcColNames.length > 0) {
+                await payCurReq.query(`
+                  INSERT INTO PaymentDetailCur (${pcColNames.join(", ")})
+                  VALUES (${pcParamNames.join(", ")})
+                `).catch(() => {});
+              }
+            }
+          }
         }
 
         // C. Update Local Flags: isUploadHQ = 1
@@ -314,6 +705,7 @@ async function pushSalesToCloud(ioInstance = null) {
     return {
       success: true,
       pushedCount,
+      liveSync: liveSyncResult,
       totalPending: pendingBills.length - pushedCount,
       timestamp: new Date().toISOString(),
     };
@@ -502,6 +894,7 @@ async function getSyncStatus() {
 
 module.exports = {
   pushSalesToCloud,
+  syncLiveTablesAndCarts,
   pullMasterFromCloud,
   getSyncStatus,
   getRemotePool,

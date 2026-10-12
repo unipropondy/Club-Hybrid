@@ -71,15 +71,21 @@ router.get("/payment/:terminal/:userId", async (req, res) => {
     // Fetch active bill payments — EXCLUDE CREDIT paymode (deferred/unpaid, not cash received) AND CANCELLED orders
     const billsResult = await request.query(`
       SELECT
-        LTRIM(RTRIM(ISNULL(pdc.Remarks, ''))) AS PaymodeName,
+        COALESCE(NULLIF(LTRIM(RTRIM(pdc.Remarks)), ''), LTRIM(RTRIM(pm.PayMode)), 'CASH') AS PaymodeName,
         ISNULL(SUM(pdc.Amount), 0) AS Amount,
         COUNT(*) AS PayCount
-      FROM PaymentDetailCur pdc
+      FROM (
+        SELECT RestaurantBillId, Paymode, Amount, Remarks, start_date FROM PaymentDetailCur
+        UNION ALL
+        SELECT RestaurantBillId, Paymode, Amount, Remarks, start_date FROM PaymentDetail
+        WHERE RestaurantBillId NOT IN (SELECT RestaurantBillId FROM PaymentDetailCur WHERE RestaurantBillId IS NOT NULL)
+      ) pdc
+      LEFT JOIN Paymode pm ON pdc.Paymode = pm.Position
       LEFT JOIN SettlementHeader sh ON pdc.RestaurantBillId = sh.SettlementID
       WHERE ${dateFilter.replace(/start_date/g, 'pdc.start_date')}
         AND (sh.SettlementID IS NULL OR ISNULL(sh.IsCancelled, 0) = 0)
-        AND UPPER(LTRIM(RTRIM(ISNULL(pdc.Remarks, '')))) NOT IN ('CREDIT', 'MEMBER')
-      GROUP BY LTRIM(RTRIM(ISNULL(pdc.Remarks, '')))
+        AND UPPER(COALESCE(NULLIF(LTRIM(RTRIM(pdc.Remarks)), ''), LTRIM(RTRIM(pm.PayMode)), 'CASH')) NOT IN ('CREDIT', 'MEMBER')
+      GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(pdc.Remarks)), ''), LTRIM(RTRIM(pm.PayMode)), 'CASH')
     `);
 
     // Fetch credit outstanding & issued amounts separately for Credit Activity tracking (excluding cancelled orders)
@@ -122,7 +128,17 @@ router.get("/payment/:terminal/:userId", async (req, res) => {
       if (raw === "P-A-Y-T-M") return "PAYTM";
       if (raw === "CASHBOX" || raw === "CASH BOX" || raw === "CASH BOX ENTRY") return "CASH BOX ENTRY";
       if (raw === "CASH" || raw === "CAS" || raw === "1") return "CASH";
-      if (raw.includes("CARD") || raw.includes("VISA") || raw.includes("MASTER") || raw.includes("AMEX") || raw.includes("DINERS")) return "CARD";
+
+      const rawClean = raw.replace(/[\s\-_]/g, "");
+      if (rawClean.includes("YEAHPAYCARD") || raw === "8") return "YEAHPAY CARD";
+      if (rawClean.includes("YEAHPAYPAYNOW") || rawClean.includes("YEAHPAYQR") || raw === "7") return "YEAHPAY PAYNOW";
+      if (raw.startsWith("YEAHPAY")) {
+        if (raw.includes("CARD")) return "YEAHPAY CARD";
+        if (raw.includes("PAYNOW") || raw.includes("QR")) return "YEAHPAY PAYNOW";
+        return "YEAHPAY CARD";
+      }
+
+      if (raw.includes("CARD") || raw.includes("VISA") || raw.includes("MASTER") || raw.includes("AMEX") || raw.includes("DINERS") || raw === "9") return "CARD";
       if (raw.includes("PAYNOW") || raw.includes("GRAB") || raw.includes("FOODPANDA") || raw === "3" || raw.includes("PAY NOW")) return "PAYNOW";
       if (raw.includes("UPI") || raw === "4" || raw.includes("GPAY") || raw.includes("PHONE") || raw.includes("PAYTM")) return "UPI";
       if (raw.includes("NETS") || raw === "2") return "NETS";

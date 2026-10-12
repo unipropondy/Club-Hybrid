@@ -165,8 +165,8 @@ export class PrintFormatter80mm implements PrintFormatter {
 // ─── PRINTER MANAGER & CAPABILITY DETECTOR ───
 
 export class SunmiPrinterManager {
-  private static paperSize: "58mm" | "80mm" = "58mm";
-  private static formatter: PrintFormatter = new PrintFormatter58mm();
+  private static paperSize: "58mm" | "80mm" = "80mm";
+  private static formatter: PrintFormatter = new PrintFormatter80mm();
   private static isInitialized = false;
 
   static async init(): Promise<void> {
@@ -176,16 +176,18 @@ export class SunmiPrinterManager {
     try {
       const model = ((Platform.constants as any).Model || '').toUpperCase();
       console.log(`🖨️ [SunmiPrinterManager] Device Model: ${model}`);
-      if (model.includes("D3")) {
-        this.paperSize = "80mm";
-      } else if (model.includes("T2")) {
+      if (model.includes("V2") || model.includes("V1") || model.includes("P2") || model.includes("M2")) {
+        // Handheld devices: 58mm
         this.paperSize = "58mm";
+      } else if (model.includes("D2") || model.includes("D3") || model.includes("T2") || model.includes("T3")) {
+        // Desktop POS terminals: 80mm
+        this.paperSize = "80mm";
       } else if (Platform.OS === "android" && SunmiPrinterDetector) {
-        // Fallback to native capabilities detector if model is ambiguous
+        // Fallback to native capabilities detector
         const size = await SunmiPrinterDetector.getPrinterPaperSize();
-        this.paperSize = size === "80mm" ? "80mm" : "58mm";
+        this.paperSize = size === "58mm" ? "58mm" : "80mm";
       } else {
-        // Default fallback prioritizes 80mm
+        // Default standard POS thermal printer width
         this.paperSize = "80mm";
       }
     } catch (e) {
@@ -605,12 +607,17 @@ class SunmiPrinterService {
       const gstAmountRaw = gstRate > 0 ? taxableAmount * (gstRate / 100) : 0;
       const gstAmount = Math.round(gstAmountRaw * 100) / 100;
       
-      if (finalTotal === 0) {
-        finalTotal = taxableAmount + gstAmount;
+      if (saleData.isCheckout || finalTotal === 0) {
+        finalTotal = Math.round((taxableAmount + gstAmount) * 100) / 100;
       }
       
+      const storedRoundOff = saleData.roundOff !== undefined && saleData.roundOff !== null
+        ? parseFloat(String(saleData.roundOff))
+        : null;
       const difference = parseFloat((finalTotal - (taxableAmount + gstAmount)).toFixed(2));
-      const printedRoundOff = Math.abs(difference) >= 0.01 ? difference : 0;
+      const printedRoundOff = (storedRoundOff !== null && !isNaN(storedRoundOff) && storedRoundOff !== 0)
+        ? storedRoundOff
+        : (!saleData.isCheckout && Math.abs(difference) >= 0.01 ? difference : 0);
 
       // Removed duplicate Sub Total print statement to prevent printing it twice when there is no discount.
 

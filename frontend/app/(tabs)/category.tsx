@@ -3044,18 +3044,32 @@ export default function Category() {
                 : { maxHeight: height * 0.8 },
             ]}
           >
-            {/* User Info Header */}
-            {user && (
-              <View style={styles.menuUserSection}>
-                <View style={styles.menuAvatar}>
-                  <Ionicons name="person" size={20} color="#8E8E93" />
-                </View>
+            {/* User Info Header & Close Button */}
+            <View style={styles.menuUserSection}>
+              {user ? (
+                <>
+                  <View style={styles.menuAvatar}>
+                    <Ionicons name="person" size={20} color="#8E8E93" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.menuUserName} numberOfLines={1}>{user.fullName}</Text>
+                    <Text style={styles.menuUserRole}>{user.roleName}</Text>
+                  </View>
+                </>
+              ) : (
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.menuUserName}>{user.fullName}</Text>
-                  <Text style={styles.menuUserRole}>{user.roleName}</Text>
+                  <Text style={styles.menuUserName}>Menu</Text>
                 </View>
-              </View>
-            )}
+              )}
+              <TouchableOpacity
+                onPress={() => setIsMenuVisible(false)}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                style={styles.menuCloseBtn}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="close" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
 
             {/* Menu Options */}
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ padding: 10 }}>
@@ -4750,6 +4764,15 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.medium,
     color: "rgba(255, 255, 255, 0.75)",
     textTransform: "uppercase",
+  },
+  menuCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
+    justifyContent: "center",
+    alignItems: "center",
+    marginLeft: 8,
   },
   menuDivider: {
     height: 1,
