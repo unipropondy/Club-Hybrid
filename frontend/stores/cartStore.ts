@@ -403,7 +403,7 @@ type CartState = {
   syncCartWithDB: (contextId: string, isImmediate?: boolean) => Promise<void>;
   fetchCartFromDB: (tableId: string) => Promise<void>;
   setTableOrderId: (tableId: string, orderId: string | null) => void;
-  checkoutOrder: (tableId: string) => Promise<{ success: boolean; orderId?: string }>;
+  checkoutOrder: (tableId: string) => Promise<{ success: boolean; orderId?: string; offline?: boolean }>;
   completeOrder: (tableId: string) => Promise<{ success: boolean }>;
   markAllAsSent: (skipSync?: boolean) => void;
   combineDuplicates: () => void;
@@ -1560,8 +1560,24 @@ export const useCartStore = create<CartState>()(
           if (__DEV__) console.log("✅ [CartStore] Checkout Success:", data);
           return { success: true };
         } catch (err: any) {
-          if (__DEV__) console.error(`❌ [CartStore] Checkout failed (all retries exhausted):`, err);
-          return { success: false };
+          if (__DEV__) console.warn(`⚠️ [CartStore] Network checkout failed, entering offline checkout mode:`, err.message);
+          // 🚀 OFFLINE FALLBACK: Allow offline checkout and transition table status locally
+          try {
+            const { useTableStatusStore } = require("./tableStatusStore");
+            const { useOrderContextStore } = require("./orderContextStore");
+            const ctx = useOrderContextStore.getState().currentOrder;
+            if (ctx) {
+              useTableStatusStore.getState().updateTableStatus(
+                tableId,
+                ctx.section || "MAIN",
+                ctx.tableNo || "1",
+                ctx.orderId || "OFFLINE_CHECKOUT",
+                "BILLING",
+                new Date().toISOString()
+              );
+            }
+          } catch (_) {}
+          return { success: true, offline: true };
         }
       },
 

@@ -9,7 +9,16 @@ let displayWindow: BrowserWindow | null = null;
 // Paths differ depending on whether we run in development (src/) or production packaged (dist/)
 const getUIPath = () => {
   const { app } = require('electron');
-  return path.join(app.getAppPath(), 'customer-display-web', 'index.html');
+  const candidates = [
+    path.join(app.getAppPath(), 'customer-display-web', 'index.html'),
+    path.join(process.resourcesPath || '', 'customer-display-web', 'index.html'),
+    path.join(process.cwd(), 'customer-display-web', 'index.html'),
+    path.join(__dirname, '..', '..', 'customer-display-web', 'index.html'),
+  ];
+  for (const c of candidates) {
+    if (require('fs').existsSync(c)) return c;
+  }
+  return candidates[0];
 };
 
 /**

@@ -220,35 +220,62 @@ export default function LoginScreen() {
     setShowServerModal(true);
   };
 
+  const buildServerUrl = (host: string, port: string): string => {
+    let cleanHost = host.trim();
+    let cleanPort = port.trim();
+
+    // If user entered a full URL (e.g. https://clubdemo2026july-production.up.railway.app)
+    if (/^https?:\/\//i.test(cleanHost)) {
+      cleanHost = cleanHost.replace(/\/+$/, "");
+      if (cleanPort && cleanPort !== "443" && cleanPort !== "80" && !cleanHost.includes(`:${cleanPort}`)) {
+        return `${cleanHost}:${cleanPort}`;
+      }
+      return cleanHost;
+    }
+
+    // If host is a cloud domain (like railway.app, up.railway.app, vercel, etc.) -> default to HTTPS without port
+    if (cleanHost.includes("railway.app") || cleanHost.includes(".com") || cleanHost.includes(".io")) {
+      if (cleanPort && cleanPort !== "443" && cleanPort !== "80" && cleanPort !== "5000") {
+        return `https://${cleanHost}:${cleanPort}`;
+      }
+      return `https://${cleanHost}`;
+    }
+
+    // Local IP or DynDNS with custom port -> http://host:port (default 5000)
+    const effectivePort = cleanPort || "5000";
+    return `http://${cleanHost}:${effectivePort}`;
+  };
+
   const handleTestConnection = async () => {
     if (!serverHost.trim()) return;
     setPingStatus("testing");
-    setPingMessage("Testing connection to counter hub...");
+    setPingMessage("Testing connection to server...");
     const t0 = Date.now();
     try {
-      const target = `http://${serverHost.trim()}:${(serverPort || "5000").trim()}/api/health`;
+      const baseUrl = buildServerUrl(serverHost, serverPort);
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 4000);
-      const res = await fetch(target, { signal: ctrl.signal });
+      const timer = setTimeout(() => ctrl.abort(), 6000);
+      let res = await fetch(`${baseUrl}/api/health`, { signal: ctrl.signal }).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`${baseUrl}/api/terminal`, { signal: ctrl.signal }).catch(() => null);
+      }
       clearTimeout(timer);
-      if (res.ok) {
+      if (res && res.ok) {
         const diff = Date.now() - t0;
         setPingStatus("success");
-        setPingMessage(`Connected! Counter Hub latency: ${diff}ms`);
+        setPingMessage(`Connected! Latency: ${diff}ms`);
       } else {
         setPingStatus("failed");
-        setPingMessage(`Server responded with HTTP ${res.status}`);
+        setPingMessage(`Server unreachable or returned HTTP ${res?.status || "error"}`);
       }
     } catch (e: any) {
       setPingStatus("failed");
-      setPingMessage("Unreachable. Check Wi-Fi & Counter PC IP.");
+      setPingMessage("Unreachable. Check URL or Wi-Fi network.");
     }
   };
 
   const handleSaveServerConfig = async () => {
-    const host = serverHost.trim() || "localhost";
-    const port = serverPort.trim() || "5000";
-    const newUrl = `http://${host}:${port}`;
+    const newUrl = buildServerUrl(serverHost, serverPort);
     await setApiUrl(newUrl);
     setCurrentUrlDisplay(newUrl);
     setShowServerModal(false);

@@ -96,24 +96,121 @@ router.post("/push", async (req, res) => {
         )
       `);
 
-      // 2.5 Update TableMaster so table turns occupied in local POS grid
+      // 2.5 Update TableMaster and handle offline settlement
       const cleanTableNo = safeTableNo.replace(/^Table\s*/i, '').trim();
+      const isPaid = order.payment_status === "PAID" || order.status === "COMPLETED";
+
       if (cleanTableNo && !safeTableNo.startsWith("TW")) {
         const tableReq = new sql.Request(transaction);
         tableReq.input("tblNo", sql.VarChar(20), cleanTableNo);
         tableReq.input("orderNo", sql.VarChar(20), safeOrderNo);
         tableReq.input("total", sql.Decimal(18, 2), parseFloat(order.total_amount) || 0);
         tableReq.input("custName", sql.NVarChar(9), safeCustomerName);
-        await tableReq.query(`
-          UPDATE TableMaster 
-          SET Status = 2, 
-              CurrentOrderId = @orderNo, 
-              TotalAmount = @total,
-              CustomerName = @custName,
-              StartTime = ISNULL(StartTime, GETDATE()), 
-              ModifiedOn = GETDATE()
-          WHERE (LTRIM(RTRIM(TableNumber)) = @tblNo OR CONVERT(VARCHAR(50), TableId) = @tblNo)
-        `).catch((tErr) => console.warn("TableMaster update warning:", tErr.message));
+
+        if (isPaid) {
+          // If already paid offline, clear and free table
+          await tableReq.query(`
+            UPDATE TableMaster 
+            SET Status = 0, 
+                CurrentOrderId = NULL, 
+                TotalAmount = 0,
+                CustomerName = NULL,
+                ModifiedOn = GETDATE()
+            WHERE (LTRIM(RTRIM(TableNumber)) = @tblNo OR CONVERT(VARCHAR(50), TableId) = @tblNo)
+          `).catch((tErr) => console.warn("TableMaster free warning:", tErr.message));
+        } else {
+          await tableReq.query(`
+            UPDATE TableMaster 
+            SET Status = 2, 
+                CurrentOrderId = @orderNo, 
+                TotalAmount = @total,
+                CustomerName = @custName,
+                StartTime = ISNULL(StartTime, GETDATE()), 
+                ModifiedOn = GETDATE()
+            WHERE (LTRIM(RTRIM(TableNumber)) = @tblNo OR CONVERT(VARCHAR(50), TableId) = @tblNo)
+          `).catch((tErr) => console.warn("TableMaster update warning:", tErr.message));
+        }
+      }
+
+      // 2.6 If order was settled offline, insert official settlement records
+      if (isPaid) {
+        let rawPayload = {};
+        try {
+          rawPayload = typeof order.raw_payload === 'string' ? JSON.parse(order.raw_payload || '{}') : (order.raw_payload || {});
+        } catch (_) {}
+
+        const payMode = String(order.payment_method || rawPayload.paymentMethod || "CASH").toUpperCase();
+        const totalAmt = parseFloat(order.total_amount) || 0;
+        const subtotalAmt = parseFloat(order.subtotal) || totalAmt;
+        const taxAmt = parseFloat(order.tax_amount) || 0;
+        const discAmt = parseFloat(order.discount_amount) || 0;
+
+        const setReq = new sql.Request(transaction);
+        setReq.input("sid", sql.UniqueIdentifier, orderGuid);
+        setReq.input("orderNo", sql.VarChar(50), safeOrderNo);
+        setReq.input("tableNo", sql.VarChar(10), safeTableNo);
+        setReq.input("subtotal", sql.Decimal(18, 2), subtotalAmt);
+        setReq.input("total", sql.Decimal(18, 2), totalAmt);
+        setReq.input("tax", sql.Decimal(18, 2), taxAmt);
+        setReq.input("disc", sql.Decimal(18, 2), discAmt);
+        setReq.input("bizId", sql.UniqueIdentifier, defaultBizId);
+        setReq.input("userId", sql.UniqueIdentifier, safeUserId);
+        setReq.input("startDate", sql.Date, activeStartDate);
+        setReq.input("payMode", sql.VarChar(50), payMode);
+        setReq.input("serverName", sql.VarChar(50), safeCustomerName);
+
+        await setReq.query(`
+          IF NOT EXISTS (SELECT 1 FROM SettlementHeader WHERE SettlementID = @sid OR BillNo = @orderNo)
+          BEGIN
+            INSERT INTO SettlementHeader (
+              SettlementID, LastSettlementDate, LastDayEndDate, SubTotal, TotalTax, DiscountAmount,
+              BillNo, OrderType, TableNo, Section, BusinessUnitId, SysAmount, ManualAmount,
+              CreatedBy, CreatedOn, SER_NAME, start_date, isUploadHQ, IsCancelled
+            ) VALUES (
+              @sid, GETDATE(), GETDATE(), @subtotal, @tax, @disc,
+              @orderNo, 'DINE-IN', @tableNo, 'MAIN', @bizId, @total, @total,
+              @userId, GETDATE(), @serverName, @startDate, 0, 0
+            );
+
+            INSERT INTO RestaurantInvoice (
+              BusinessUnitId, RestaurantBillId, OrderId, BillNumber, OrderDateTime, TimeBilled,
+              TotalLineItemAmount, TotalTax, DiscountAmount, TotalAmount, StatusCode,
+              CreatedBy, CreatedOn, InvoiceDate, PaymentTermCode, start_date, isUploadHQ
+            ) VALUES (
+              @bizId, @sid, @sid, @orderNo, GETDATE(), GETDATE(),
+              @subtotal, @tax, @disc, @total, 5,
+              @userId, GETDATE(), CAST(GETDATE() AS DATE), @payMode, @startDate, 0
+            );
+
+            INSERT INTO RestaurantInvoiceCur (
+              BusinessUnitId, RestaurantBillId, OrderId, BillNumber, OrderDateTime, TimeBilled,
+              TotalLineItemAmount, TotalTax, DiscountAmount, TotalAmount, StatusCode,
+              CreatedBy, CreatedOn, InvoiceDate, PaymentTermCode, start_date
+            ) VALUES (
+              @bizId, @sid, @sid, @orderNo, GETDATE(), GETDATE(),
+              @subtotal, @tax, @disc, @total, 5,
+              @userId, GETDATE(), CAST(GETDATE() AS DATE), @payMode, @startDate
+            );
+
+            INSERT INTO PaymentDetailCur (
+              RestaurantBillId, Paymode, Amount, start_date, CreatedOn
+            ) VALUES (
+              @sid, 1, @total, @startDate, GETDATE()
+            );
+
+            INSERT INTO PaymentDetail (
+              RestaurantBillId, Paymode, Amount, start_date, CreatedOn, isUploadHQ
+            ) VALUES (
+              @sid, 1, @total, @startDate, GETDATE(), 0
+            );
+
+            INSERT INTO SettlementTotalSales (
+              SettlementID, PayMode, SysAmount, ManualAmount, ReceiptCount, start_date
+            ) VALUES (
+              @sid, @payMode, @total, @total, 1, @startDate
+            );
+          END
+        `).catch(sErr => console.warn("SettlementHeader insert warning:", sErr.message));
       }
 
       // 3. Insert Order Items into RestaurantOrderDetailCur
@@ -161,6 +258,24 @@ router.post("/push", async (req, res) => {
               1, GETDATE(), GETDATE(), @clientItemId, @bizId, @userId, @startDate
             )
           `);
+
+          // Insert into SettlementItemDetail if offline settled
+          if (isPaid) {
+            const sItemReq = new sql.Request(transaction);
+            sItemReq.input("sid", sql.UniqueIdentifier, orderGuid);
+            sItemReq.input("dishId", sql.UniqueIdentifier, dishGuid);
+            sItemReq.input("qty", sql.Decimal(18, 2), qty);
+            sItemReq.input("rate", sql.Decimal(18, 2), unitPrice);
+            sItemReq.input("amt", sql.Decimal(18, 2), totalPrice);
+            sItemReq.input("startDate", sql.Date, activeStartDate);
+            await sItemReq.query(`
+              INSERT INTO SettlementItemDetail (
+                SettlementID, DishId, Quantity, Rate, ItemAmount, start_date
+              ) VALUES (
+                @sid, @dishId, @qty, @rate, @amt, @startDate
+              )
+            `).catch(iErr => console.warn("SettlementItemDetail insert warning:", iErr.message));
+          }
         }
       }
 
@@ -179,6 +294,16 @@ router.post("/push", async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
+
+    // ☁️ POST-SYNC CLOUD PUSH TRIGGER (Immediate background delta push to Central Cloud ERP)
+    setImmediate(() => {
+      try {
+        const { pushSalesToCloud } = require("../services/cloudSync.service");
+        pushSalesToCloud(io).catch(e => console.warn("⚠️ [TabletSync Cloud Push Notice]:", e.message));
+      } catch (e) {
+        console.warn("⚠️ [TabletSync Cloud Push Notice]:", e.message);
+      }
+    });
 
     return res.json({
       success: true,

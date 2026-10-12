@@ -339,6 +339,16 @@ router.post("/settlement", async (req, res) => {
 
     await transaction.commit();
 
+    // ☁️ POST-SETTLEMENT CLOUD SYNC TRIGGER (Immediate delta push)
+    setImmediate(() => {
+      try {
+        const { pushSalesToCloud } = require("../services/cloudSync.service");
+        pushSalesToCloud(req.app.get("io")).catch(e => console.warn("⚠️ [Settlement Push Notice]:", e.message));
+      } catch (e) {
+        console.warn("⚠️ [Settlement Push Notice]:", e.message);
+      }
+    });
+
     res.json({
       message: "Settlement Completed ✅",
       settlementId

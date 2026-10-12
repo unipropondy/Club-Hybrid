@@ -159,11 +159,32 @@ static async loadSettings(userId?: string | number): Promise<CompanySettings> {
                 time: now
             };
 
+            // Persist to AsyncStorage for offline printing
+            AsyncStorage.setItem('@offline_company_settings', JSON.stringify(result)).catch(() => {});
+
             return result;
+        }
+
+        // Try reading from AsyncStorage when server response is not successful
+        const stored = await AsyncStorage.getItem('@offline_company_settings').catch(() => null);
+        if (stored) {
+            try {
+                const parsed = JSON.parse(stored);
+                this.settingsCache[targetId] = { data: parsed, time: now };
+                return parsed;
+            } catch (_) {}
         }
         return this.getDefaultSettings();
     } catch (error) {
-        console.log('❌ Error loading settings:', error);
+        console.log('❌ Error loading settings (checking offline storage):', error);
+        // Fallback to AsyncStorage for offline mode
+        try {
+            const stored = await AsyncStorage.getItem('@offline_company_settings');
+            if (stored) {
+                const parsed = JSON.parse(stored);
+                return parsed;
+            }
+        } catch (_) {}
         return this.getDefaultSettings();
     }
 }

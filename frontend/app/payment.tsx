@@ -1881,14 +1881,114 @@ export default function PaymentScreen() {
         showToast({ type: "error", message: "Failed", subtitle: result.error });
       }
     } catch (e: any) {
-      console.error("❌ [Sales Checkout Network Failure Details]:", {
-        endpoint: `${API_URL}/api/sales/save`,
-        message: e?.message || e,
-        stack: e?.stack,
-        errorObject: e,
-        timestamp: new Date().toISOString(),
-      });
-      showToast({ type: "error", message: "Error", subtitle: e.message });
+      console.warn("⚠️ [Sales Checkout Network Failure - Activating Offline Mode]:", e.message);
+
+      try {
+        const { OrderRepository } = require("../db/OrderRepository");
+
+        const offlineBillNo =
+          displayOrderId ||
+          saleData.orderId ||
+          `OFF-${(user?.userCode || "TAB").replace(/[^a-zA-Z0-9]/g, "").substring(0, 4)}-${Date.now().toString().slice(-6)}`;
+
+        // 1. Save completed order into local SQLite
+        await OrderRepository.createOrder(
+          {
+            order_id: checkoutSessionId,
+            order_number: offlineBillNo,
+            table_no: String(context?.tableNo || saleData.tableNo || "TA"),
+            waiter_name: user?.userName || context?.serverName || "Staff",
+            customer_name: loyaltyName || saleData.customerName || "",
+            subtotal: subtotal || 0,
+            tax_amount: displayedTax || 0,
+            discount_amount: (discountAmount + payItemDiscount) || 0,
+            total_amount: total || 0,
+            status: "COMPLETED",
+            payment_status: "PAID",
+            payment_method: saleData.paymentMethod || "CASH",
+            raw_payload: JSON.stringify({
+              ...saleData,
+              billNo: offlineBillNo,
+              settlementId: checkoutSessionId,
+              isOfflineSettled: true,
+            }),
+          },
+          (calculatedItems || finalItems || []).map((item: any) => ({
+            dish_id: item.dishId || item.DishId || item.id || "00000000-0000-0000-0000-000000000000",
+            dish_name: item.name || "Item",
+            quantity: Number(item.qty || 1),
+            unit_price: Number(item.price || 0),
+            total_price: Number(item.price || 0) * Number(item.qty || 1),
+            notes: item.notes || "",
+            kds_status: "SERVED",
+          }))
+        );
+
+        console.log(`💾 [Payment] Offline sale ${offlineBillNo} saved locally in SQLite!`);
+
+        showToast({
+          type: "warning",
+          message: "Paid Offline",
+          subtitle: `Saved locally (${offlineBillNo}). Will sync automatically once connected.`,
+          duration: 4000,
+        });
+
+        // 2. Navigate to payment_success with offline bill info
+        router.push({
+          pathname: "/payment_success" as any,
+          params: {
+            total: total.toFixed(2),
+            paidNum: (payments && payments.length > 0 ? total : paidNum).toFixed(2),
+            change: (payments && payments.length > 0 ? 0 : change).toFixed(2),
+            method: payments && payments.length > 0 ? "SPLIT" : method.trim(),
+            payments: payments ? JSON.stringify(payments) : "[]",
+            orderId: offlineBillNo,
+            tableNo: context?.tableNo ?? "",
+            section: context?.section ?? "",
+            orderType: context?.orderType ?? "",
+            discountInfo: JSON.stringify(
+              discount?.applied && discountAmount > 0
+                ? { ...discount, amount: discountAmount, subtotal }
+                : {},
+            ),
+            items: JSON.stringify(calculatedItems || finalItems || []),
+            roundOff: displayedRoundOff.toFixed(2),
+            serviceCharge: displayedServiceCharge.toFixed(2),
+            takeawayCharge: currentTakeawayCharge.toFixed(2),
+            isSplit: splitItems ? "true" : "false",
+            waiterName: context?.serverName ?? "",
+            rewardPointsEarned: "0",
+            memberRewardBalance: "0",
+            mobileNo: loyaltyPhone || "",
+            vipDiscountAmount: (vipDiscountAmount || 0).toFixed(2),
+            isOffline: "true",
+          },
+        });
+
+        // 3. Cleanup local state
+        const ctxSnapshot = context;
+        const orderIdSnapshot = displayOrderId;
+        setTimeout(() => {
+          if (ctxSnapshot) {
+            if (ctxSnapshot.orderType === "DINE_IN") {
+              clearTable(ctxSnapshot.section!, ctxSnapshot.tableNo!);
+            }
+            if (ctxSnapshot.tableId) {
+              useCartStore.getState().clearTableSession(ctxSnapshot.tableId);
+              closeActiveOrder(orderIdSnapshot || "");
+            }
+            useOrderContextStore.getState().clearOrderContext();
+          }
+        }, 800);
+
+      } catch (offlineErr: any) {
+        console.error("❌ Failed to save sale offline:", offlineErr);
+        showToast({
+          type: "error",
+          message: "Payment Failed",
+          subtitle: "Connection error and offline storage failed.",
+        });
+      }
     } finally {
       setProcessing(false);
     }

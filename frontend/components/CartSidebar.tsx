@@ -1465,10 +1465,14 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
         useActiveOrdersStore.getState().fetchActiveKitchenOrders();
 
         showToast({
-          type: "success",
-          message: "Success",
-          subtitle: enableCheckoutBill ? "Order finalized & Printing..." : "Checkout completed successfully. Bill printing is disabled.",
-          duration: 1500,
+          type: res?.offline ? "warning" : "success",
+          message: res?.offline ? "Offline Checkout" : "Success",
+          subtitle: res?.offline
+            ? "Offline mode active. Table marked for billing."
+            : enableCheckoutBill
+            ? "Order finalized & Printing..."
+            : "Checkout completed successfully. Bill printing is disabled.",
+          duration: 2000,
         });
 
         if (enableCheckoutFlow !== false) {

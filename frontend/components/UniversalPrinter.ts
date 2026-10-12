@@ -10,6 +10,7 @@ import { formatToSingaporeDate, formatToSingaporeTime, formatToSingaporeDateTime
 import BillPDFGenerator from "./BillPDFGenerator";
 import { PrinterDetector } from "./PrinterDetector";
 import SunmiPrinterService, { SunmiPrinterManager } from "./SunmiPrinterService";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCompanySettingsStore } from "../stores/companySettingsStore";
 import { useGeneralSettingsStore } from "../stores/generalSettingsStore";
 import { useCartStore } from "../stores/cartStore";
@@ -683,15 +684,24 @@ class UniversalPrinter {
         }
       }
 
+      // Check for device-specific local printer override (e.g. tablet belt printer)
+      try {
+        const localOverride = await AsyncStorage.getItem('@local_printer_override');
+        if (localOverride && localOverride.trim()) {
+          targetIp = localOverride.trim();
+        }
+      } catch (_) {}
+
       // ✅ 1. Try Hardware Printer (WiFi or Bluetooth)
       const hasConfiguredIp = targetIp && targetIp.trim().length > 0;
       if (hasConfiguredIp) {
         let isReachable = false;
         const isIp = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(targetIp.trim());
         if (isIp) {
-          isReachable = await this.isIpReachable(targetIp);
+          // On Android native APK, thermal printers use raw TCP port 9100 without port 80 webserver
+          isReachable = Platform.OS === "android" ? true : await this.isIpReachable(targetIp);
         } else {
-          isReachable = true;
+          isReachable = true; // Bluetooth MAC addresses
         }
 
         if (isReachable) {
@@ -1319,6 +1329,14 @@ class UniversalPrinter {
           targetIp = cashierIp || company.printerIp || "";
         }
 
+        // Check for device-specific local printer override
+        try {
+          const localOverride = await AsyncStorage.getItem('@local_printer_override');
+          if (localOverride && localOverride.trim()) {
+            targetIp = localOverride.trim();
+          }
+        } catch (_) {}
+
         const hasConfiguredIp = targetIp && targetIp.trim().length > 0;
 
         if (hasConfiguredIp) {
@@ -1343,7 +1361,8 @@ class UniversalPrinter {
 
           let isReachable = false;
           if (isIp) {
-            isReachable = await this.isIpReachable(targetIp);
+            // On Android native APK, thermal printers use raw TCP port 9100 without port 80 webserver
+            isReachable = Platform.OS === "android" ? true : await this.isIpReachable(targetIp);
           } else {
             isReachable = true; // For Bluetooth MAC addresses
           }

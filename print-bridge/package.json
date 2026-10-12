@@ -1,7 +1,7 @@
 {
-  "name": "unipro-print-bridge",
+  "name": "unipro-pos-counter",
   "version": "1.0.0",
-  "description": "Standalone LAN/Wi-Fi Print Bridge with Integrated Dual Monitor Customer Display",
+  "description": "UniPro Hybrid POS Counter PC - Integrated Cashier POS Terminal, Dual Monitor Customer Display & LAN Print Bridge",
   "author": "UniPro",
   "main": "dist/index.js",
   "scripts": {
@@ -26,8 +26,8 @@
     "typescript": "^5.3.2"
   },
   "build": {
-    "appId": "com.unipro.printbridge",
-    "productName": "UniPro Print Bridge",
+    "appId": "com.unipro.poscounter",
+    "productName": "UniPro POS Counter",
     "directories": {
       "output": "dist-installer"
     },
@@ -48,7 +48,10 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "UniPro POS Counter"
     }
   }
 }

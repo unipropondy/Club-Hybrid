@@ -39,7 +39,7 @@ const calculateInitialUrl = (): string => {
     return `${window.location.protocol}//${window.location.hostname}${window.location.port ? `:${window.location.port}` : ""}`;
   }
 
-  return "https://clubdemo2026july-production.up.railway.app";
+  return "https://club-hybrid-production.up.railway.app";
 };
 
 export let API_URL: string = calculateInitialUrl();
@@ -95,6 +95,23 @@ export const initApiUrl = async (): Promise<string> => {
       urlListeners.forEach((fn) => fn(formatted));
       console.log(`🌐 [Config] Loaded custom API_URL from storage: ${formatted}`);
       return formatted;
+    }
+
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      try {
+        const confRes = await fetch("/api/config");
+        if (confRes.ok) {
+          const conf = await confRes.json();
+          const activeBackend = conf?.backends?.find((b: any) => b.enabled);
+          if (activeBackend?.url) {
+            let formatted = activeBackend.url.trim().replace(/\/+$/, "");
+            API_URL = formatted;
+            urlListeners.forEach((fn) => fn(formatted));
+            console.log(`🌐 [Config] Auto-detected backend API_URL from print-bridge: ${formatted}`);
+            return formatted;
+          }
+        }
+      } catch (_) {}
     }
   } catch (e) {
     console.warn("⚠️ Error loading custom API URL from storage:", e);

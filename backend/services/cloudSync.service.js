@@ -11,7 +11,13 @@ let remotePoolInstance = null;
  */
 async function getRemotePool() {
   if (remotePoolInstance && remotePoolInstance.connected) {
-    return remotePoolInstance;
+    try {
+      await remotePoolInstance.request().query("SELECT 1 AS ping");
+      return remotePoolInstance;
+    } catch {
+      try { await remotePoolInstance.close(); } catch {}
+      remotePoolInstance = null;
+    }
   }
 
   const remoteConfig = {
@@ -24,15 +30,15 @@ async function getRemotePool() {
       encrypt: false,
       trustServerCertificate: true,
       enableArithAbort: true,
-      connectTimeout: 15000,
-      requestTimeout: 30000,
+      connectTimeout: 30000,
+      requestTimeout: 45000,
     },
-    connectionTimeout: 15000,
-    requestTimeout: 30000,
+    connectionTimeout: 30000,
+    requestTimeout: 45000,
     pool: {
-      max: 10,
+      max: 5,
       min: 0,
-      idleTimeoutMillis: 30000,
+      idleTimeoutMillis: 15000,
     },
   };
 
@@ -42,6 +48,7 @@ async function getRemotePool() {
     remotePoolInstance = pool;
     remotePoolInstance.on("error", (err) => {
       console.warn("⚠️ [CloudSync Remote Pool Warning]:", err.message);
+      try { remotePoolInstance?.close(); } catch {}
       remotePoolInstance = null;
     });
     return remotePoolInstance;
@@ -364,6 +371,15 @@ async function pushSalesToCloud(ioInstance = null) {
 
     const pendingBills = pendingRes.recordset;
     if (pendingBills.length === 0) {
+      // Still sync members, attendance, and sequences even if no pending bills
+      try {
+        await syncMembersAndCreditCustomers(remotePool, localPool);
+        await syncStaffAttendance(remotePool, localPool);
+        await syncSettingsAndSequences(remotePool, localPool);
+      } catch (subSyncErr) {
+        console.warn("⚠️ [CloudSync] Auxiliary sync notice:", subSyncErr.message);
+      }
+
       // Update LastCloudSyncTime even if no bills were pending
       await localPool.request().query(`
         IF EXISTS (SELECT 1 FROM AppSettings)
@@ -405,6 +421,8 @@ async function pushSalesToCloud(ioInstance = null) {
     const payCurCols = (await remoteCols("PaymentDetailCur")).filter((c) => c.IsIdentity !== 1);
     const stsCols = (await remoteCols("SettlementTotalSales")).filter((c) => c.IsIdentity !== 1);
     const sddCols = (await remoteCols("SettlementDiscountDetail")).filter((c) => c.IsIdentity !== 1);
+    const orderCols = (await remoteCols("RestaurantOrder")).filter((c) => c.IsIdentity !== 1);
+    const orderDetailCols = (await remoteCols("RestaurantOrderDetail")).filter((c) => c.IsIdentity !== 1);
 
     let pushedCount = 0;
 
@@ -628,6 +646,91 @@ async function pushSalesToCloud(ioInstance = null) {
               }
             }
 
+            // 7. Insert RestaurantOrder & RestaurantOrderDetail (Historical Closed Order Records)
+            const IS_UUID_RGX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            let targetOrderGuid = null;
+
+            if (bill.OrderId && IS_UUID_RGX.test(String(bill.OrderId).trim())) {
+              targetOrderGuid = String(bill.OrderId).trim();
+            } else if (bill.OrderId || bill.BillNo) {
+              const lookupVal = String(bill.OrderId || bill.BillNo).trim();
+              const ordLookup = await localPool.request()
+                .input("orderNo", sql.NVarChar(100), lookupVal)
+                .query(`
+                  SELECT TOP 1 OrderId FROM RestaurantOrder WITH (NOLOCK) 
+                  WHERE OrderNumber = @orderNo OR OrderId = TRY_CAST(@orderNo AS UNIQUEIDENTIFIER)
+                `);
+              if (ordLookup.recordset.length > 0) {
+                targetOrderGuid = ordLookup.recordset[0].OrderId;
+              }
+            }
+
+            if (targetOrderGuid && IS_UUID_RGX.test(targetOrderGuid)) {
+              const localOrderRes = await localPool.request()
+                .input("oid", sql.UniqueIdentifier, targetOrderGuid)
+                .query("SELECT TOP 1 * FROM RestaurantOrder WITH (NOLOCK) WHERE OrderId = @oid");
+
+              if (localOrderRes.recordset.length > 0) {
+                const ordRow = localOrderRes.recordset[0];
+                const ordCheck = await remotePool.request()
+                  .input("oid", sql.UniqueIdentifier, ordRow.OrderId)
+                  .query("SELECT TOP 1 OrderId FROM RestaurantOrder WITH (NOLOCK) WHERE OrderId = @oid");
+
+                if (ordCheck.recordset.length === 0) {
+                  const oReq = new sql.Request(rTx);
+                  const oColNames = [];
+                  const oParamNames = [];
+                  for (const col of orderCols) {
+                    const val = ordRow[col.COLUMN_NAME];
+                    if (val !== undefined && val !== null) {
+                      let paramVal = val;
+                      if (["datetime", "date", "smalldatetime"].includes(col.DATA_TYPE)) {
+                        paramVal = safeDate(val);
+                      }
+                      oColNames.push(`[${col.COLUMN_NAME}]`);
+                      oParamNames.push(`@ro_${col.COLUMN_NAME}`);
+                      oReq.input(`ro_${col.COLUMN_NAME}`, paramVal);
+                    }
+                  }
+                  if (oColNames.length > 0) {
+                    await oReq.query(`INSERT INTO RestaurantOrder (${oColNames.join(", ")}) VALUES (${oParamNames.join(", ")})`).catch(() => {});
+                  }
+                }
+
+                const localDetailsRes = await localPool.request()
+                  .input("oid", sql.UniqueIdentifier, ordRow.OrderId)
+                  .query("SELECT * FROM RestaurantOrderDetail WITH (NOLOCK) WHERE OrderId = @oid");
+
+                for (let d = 0; d < localDetailsRes.recordset.length; d++) {
+                  const dRow = localDetailsRes.recordset[d];
+                  const odCheck = await remotePool.request()
+                    .input("did", sql.UniqueIdentifier, dRow.OrderDetailId)
+                    .query("SELECT TOP 1 OrderDetailId FROM RestaurantOrderDetail WITH (NOLOCK) WHERE OrderDetailId = @did");
+
+                  if (odCheck.recordset.length === 0) {
+                    const odReq = new sql.Request(rTx);
+                    const odColNames = [];
+                    const odParamNames = [];
+                    for (const col of orderDetailCols) {
+                      const val = dRow[col.COLUMN_NAME];
+                      if (val !== undefined && val !== null) {
+                        let paramVal = val;
+                        if (["datetime", "date", "smalldatetime"].includes(col.DATA_TYPE)) {
+                          paramVal = safeDate(val);
+                        }
+                        odColNames.push(`[${col.COLUMN_NAME}]`);
+                        odParamNames.push(`@rod_${d}_${col.COLUMN_NAME}`);
+                        odReq.input(`rod_${d}_${col.COLUMN_NAME}`, paramVal);
+                      }
+                    }
+                    if (odColNames.length > 0) {
+                      await odReq.query(`INSERT INTO RestaurantOrderDetail (${odColNames.join(", ")}) VALUES (${odParamNames.join(", ")})`).catch(() => {});
+                    }
+                  }
+                }
+              }
+            }
+
             await rTx.commit();
           } catch (rErr) {
             await rTx.rollback();
@@ -686,7 +789,16 @@ async function pushSalesToCloud(ioInstance = null) {
       }
     }
 
-    // 3. Update LastCloudSyncTime in AppSettings
+    // 3. Sync Members & Credit Customers (Push balances & transactions, Pull new members)
+    await syncMembersAndCreditCustomers(remotePool, localPool);
+
+    // 4. Sync Staff Attendance (DailyAttendance, DailyAttendanceLog, TimeEntry)
+    await syncStaffAttendance(remotePool, localPool);
+
+    // 5. Sync Settings & Order Sequences
+    await syncSettingsAndSequences(remotePool, localPool);
+
+    // 6. Update LastCloudSyncTime in AppSettings
     await localPool.request().query(`
       IF EXISTS (SELECT 1 FROM AppSettings)
         UPDATE AppSettings SET LastCloudSyncTime = GETDATE()
@@ -817,6 +929,12 @@ async function pullMasterFromCloud(ioInstance = null) {
         `).catch(() => {});
     }
 
+    // 5. Pull new Members & Credit Accounts from Cloud
+    await syncMembersAndCreditCustomers(remotePool, localPool);
+
+    // 6. Pull updated CompanySettings from Cloud
+    await syncSettingsAndSequences(remotePool, localPool);
+
     console.log(`✅ [CloudSync] Master data pull complete (${remoteDishes.recordset.length} dishes, ${remoteTables.recordset.length} tables synced).`);
 
     if (ioInstance) {
@@ -838,6 +956,381 @@ async function pullMasterFromCloud(ioInstance = null) {
       offline: true,
       error: error.message,
     };
+  }
+}
+
+/**
+ * Synchronizes MemberMaster, CreditCustomerMaster, and CustomerCreditTransactions
+ * between Local and Remote Cloud ERP.
+ */
+async function syncMembersAndCreditCustomers(remotePool, localPool) {
+  try {
+    const remoteCols = async (tableName) => {
+      const res = await remotePool.request().query(`
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMNPROPERTY(object_id(TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IsIdentity
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = '${tableName}'
+      `);
+      return res.recordset.filter(c => c.IsIdentity !== 1);
+    };
+
+    // 1. Push CustomerCreditTransactions (idempotent on TransactionId)
+    const pendingTxRes = await localPool.request().query(`
+      SELECT TOP 100 * FROM CustomerCreditTransactions WITH (NOLOCK)
+      ORDER BY CreatedDate DESC
+    `);
+    const txCols = await remoteCols("CustomerCreditTransactions");
+    let txCount = 0;
+
+    for (const tx of pendingTxRes.recordset) {
+      const check = await remotePool.request()
+        .input("txId", sql.UniqueIdentifier, tx.TransactionId)
+        .query("SELECT TOP 1 TransactionId FROM CustomerCreditTransactions WITH (NOLOCK) WHERE TransactionId = @txId");
+
+      if (check.recordset.length === 0) {
+        const iReq = remotePool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of txCols) {
+          const val = tx[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            let paramVal = val;
+            if (["datetime", "date", "datetime2", "smalldatetime"].includes(col.DATA_TYPE)) {
+              paramVal = safeDate(val);
+            }
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@tx_${col.COLUMN_NAME}`);
+            iReq.input(`tx_${col.COLUMN_NAME}`, paramVal);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`
+            INSERT INTO CustomerCreditTransactions (${colNames.join(", ")})
+            VALUES (${paramNames.join(", ")})
+          `).catch(e => console.warn("CreditTx insert warning:", e.message));
+          txCount++;
+        }
+      }
+    }
+
+    // 2. Push MemberMaster balances (CurrentBalance, CreditLimit, RewardCredit, Promoamount, IsActive)
+    const locMembersRes = await localPool.request().query(`
+      SELECT MemberId, Name, Phone, Email, CreditLimit, CurrentBalance, RewardCredit, Promoamount, IsActive, ModifiedDate
+      FROM MemberMaster WITH (NOLOCK)
+    `);
+    const memCols = await remoteCols("MemberMaster");
+
+    for (const m of locMembersRes.recordset) {
+      const check = await remotePool.request()
+        .input("mId", sql.UniqueIdentifier, m.MemberId)
+        .query("SELECT TOP 1 MemberId FROM MemberMaster WITH (NOLOCK) WHERE MemberId = @mId");
+
+      if (check.recordset.length > 0) {
+        await remotePool.request()
+          .input("mId", sql.UniqueIdentifier, m.MemberId)
+          .input("bal", sql.Decimal(18, 2), m.CurrentBalance || 0)
+          .input("limit", sql.Decimal(18, 2), m.CreditLimit || 0)
+          .input("rc", sql.Decimal(18, 2), m.RewardCredit || 0)
+          .input("pa", sql.Decimal(18, 2), m.Promoamount || 0)
+          .input("active", sql.Bit, m.IsActive ? 1 : 0)
+          .input("dt", sql.DateTime, safeDate(m.ModifiedDate) || new Date())
+          .query(`
+            UPDATE MemberMaster
+            SET CurrentBalance = @bal,
+                CreditLimit = @limit,
+                RewardCredit = @rc,
+                Promoamount = @pa,
+                IsActive = @active,
+                ModifiedDate = @dt
+            WHERE MemberId = @mId
+          `).catch(() => {});
+      } else {
+        const fullMem = await localPool.request()
+          .input("mId", sql.UniqueIdentifier, m.MemberId)
+          .query("SELECT TOP 1 * FROM MemberMaster WITH (NOLOCK) WHERE MemberId = @mId");
+        if (fullMem.recordset.length > 0) {
+          const row = fullMem.recordset[0];
+          const iReq = remotePool.request();
+          const colNames = [];
+          const paramNames = [];
+          for (const col of memCols) {
+            const val = row[col.COLUMN_NAME];
+            if (val !== undefined && val !== null) {
+              let paramVal = val;
+              if (["datetime", "date", "smalldatetime", "datetime2"].includes(col.DATA_TYPE)) {
+                paramVal = safeDate(val);
+              }
+              colNames.push(`[${col.COLUMN_NAME}]`);
+              paramNames.push(`@m_${col.COLUMN_NAME}`);
+              iReq.input(`m_${col.COLUMN_NAME}`, paramVal);
+            }
+          }
+          if (colNames.length > 0) {
+            await iReq.query(`
+              INSERT INTO MemberMaster (${colNames.join(", ")})
+              VALUES (${paramNames.join(", ")})
+            `).catch(() => {});
+          }
+        }
+      }
+    }
+
+    // 3. Push CreditCustomerMaster balances
+    const locCustRes = await localPool.request().query(`
+      SELECT CustomerId, Name, Phone, Email, CreditLimit, CurrentBalance, IsActive
+      FROM CreditCustomerMaster WITH (NOLOCK)
+    `);
+    for (const c of locCustRes.recordset) {
+      await remotePool.request()
+        .input("cId", sql.UniqueIdentifier, c.CustomerId)
+        .input("bal", sql.Decimal(18, 2), c.CurrentBalance || 0)
+        .input("limit", sql.Decimal(18, 2), c.CreditLimit || 0)
+        .input("active", sql.Bit, c.IsActive ? 1 : 0)
+        .query(`
+          IF EXISTS (SELECT 1 FROM CreditCustomerMaster WHERE CustomerId = @cId)
+            UPDATE CreditCustomerMaster 
+            SET CurrentBalance = @bal, CreditLimit = @limit, IsActive = @active
+            WHERE CustomerId = @cId
+        `).catch(() => {});
+    }
+
+    // 4. Pull new Members from Remote down to Local (bidirectional)
+    const remoteNewMems = await remotePool.request().query(`
+      SELECT MemberId, Name, Phone, Email, CreditLimit, CurrentBalance, RewardCredit, Promoamount, IsActive
+      FROM MemberMaster WITH (NOLOCK)
+      WHERE MemberId NOT IN (SELECT MemberId FROM MemberMaster WITH (NOLOCK))
+    `).catch(() => ({ recordset: [] }));
+
+    for (const nm of remoteNewMems.recordset) {
+      await localPool.request()
+        .input("id", sql.UniqueIdentifier, nm.MemberId)
+        .input("name", sql.NVarChar(200), nm.Name)
+        .input("phone", sql.NVarChar(50), nm.Phone || null)
+        .input("email", sql.NVarChar(100), nm.Email || null)
+        .input("limit", sql.Decimal(18, 2), nm.CreditLimit || 0)
+        .input("bal", sql.Decimal(18, 2), nm.CurrentBalance || 0)
+        .input("rc", sql.Decimal(18, 2), nm.RewardCredit || 0)
+        .input("pa", sql.Decimal(18, 2), nm.Promoamount || 0)
+        .input("active", sql.Bit, nm.IsActive ? 1 : 0)
+        .query(`
+          IF NOT EXISTS (SELECT 1 FROM MemberMaster WHERE MemberId = @id)
+            INSERT INTO MemberMaster (MemberId, Name, Phone, Email, CreditLimit, CurrentBalance, RewardCredit, Promoamount, IsActive, CreatedAt)
+            VALUES (@id, @name, @phone, @email, @limit, @bal, @rc, @pa, @active, GETDATE())
+        `).catch(() => {});
+    }
+
+    console.log(`✅ [CloudSync] Members & credit ledger synchronized (tx: ${txCount}, members: ${locMembersRes.recordset.length}).`);
+  } catch (err) {
+    console.warn("⚠️ [CloudSync Members Notice]:", err.message);
+  }
+}
+
+/**
+ * Synchronizes Staff Attendance (DailyAttendance, DailyAttendanceLog, TimeEntry) to Cloud ERP.
+ */
+async function syncStaffAttendance(remotePool, localPool) {
+  try {
+    const remoteCols = async (tableName) => {
+      const res = await remotePool.request().query(`
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMNPROPERTY(object_id(TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IsIdentity
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = '${tableName}'
+      `);
+      return res.recordset.filter(c => c.IsIdentity !== 1);
+    };
+
+    // 1. DailyAttendance
+    const locAttRes = await localPool.request().query(`
+      SELECT TOP 50 * FROM DailyAttendance WITH (NOLOCK)
+      ORDER BY StartDateTime DESC
+    `);
+    const attCols = await remoteCols("DailyAttendance");
+
+    for (const att of locAttRes.recordset) {
+      const sdt = safeDate(att.StartDateTime);
+      if (!sdt) continue;
+
+      const check = await remotePool.request()
+        .input("dpId", sql.UniqueIdentifier, att.DeliveryPersonId)
+        .input("sdt", sql.DateTime, sdt)
+        .query(`
+          SELECT TOP 1 DeliveryPersonId FROM DailyAttendance WITH (NOLOCK)
+          WHERE DeliveryPersonId = @dpId AND CAST(StartDateTime as DATE) = CAST(@sdt as DATE)
+        `);
+
+      if (check.recordset.length === 0) {
+        const iReq = remotePool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of attCols) {
+          const val = att[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            let paramVal = val;
+            if (["datetime", "date", "smalldatetime"].includes(col.DATA_TYPE)) {
+              paramVal = safeDate(val);
+            }
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@da_${col.COLUMN_NAME}`);
+            iReq.input(`da_${col.COLUMN_NAME}`, paramVal);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`
+            INSERT INTO DailyAttendance (${colNames.join(", ")})
+            VALUES (${paramNames.join(", ")})
+          `).catch(() => {});
+        }
+      } else {
+        await remotePool.request()
+          .input("dpId", sql.UniqueIdentifier, att.DeliveryPersonId)
+          .input("sdt", sql.DateTime, sdt)
+          .input("edt", sql.DateTime, safeDate(att.EndDateTime))
+          .input("hrs", sql.Decimal(18, 2), att.NoofHours || 0)
+          .input("amt", sql.Decimal(18, 2), att.TotalAmount || 0)
+          .query(`
+            UPDATE DailyAttendance
+            SET EndDateTime = @edt, NoofHours = @hrs, TotalAmount = @amt, ModifiedOn = GETDATE()
+            WHERE DeliveryPersonId = @dpId AND CAST(StartDateTime as DATE) = CAST(@sdt as DATE)
+          `).catch(() => {});
+      }
+    }
+
+    // 2. TimeEntry
+    const locTimeRes = await localPool.request().query(`
+      SELECT TOP 50 * FROM TimeEntry WITH (NOLOCK)
+      ORDER BY ClockinTime DESC
+    `);
+    const timeCols = await remoteCols("TimeEntry");
+
+    for (const te of locTimeRes.recordset) {
+      const cit = safeDate(te.ClockinTime);
+      if (!cit) continue;
+
+      const check = await remotePool.request()
+        .input("uid", sql.UniqueIdentifier, te.Userid)
+        .input("cit", sql.DateTime, cit)
+        .query(`
+          SELECT TOP 1 Userid FROM TimeEntry WITH (NOLOCK)
+          WHERE Userid = @uid AND ClockinTime = @cit
+        `);
+
+      if (check.recordset.length === 0) {
+        const iReq = remotePool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of timeCols) {
+          const val = te[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            let paramVal = val;
+            if (["datetime", "date", "smalldatetime"].includes(col.DATA_TYPE)) {
+              paramVal = safeDate(val);
+            }
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@te_${col.COLUMN_NAME}`);
+            iReq.input(`te_${col.COLUMN_NAME}`, paramVal);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`
+            INSERT INTO TimeEntry (${colNames.join(", ")})
+            VALUES (${paramNames.join(", ")})
+          `).catch(() => {});
+        }
+      }
+    }
+
+    console.log(`✅ [CloudSync] Staff attendance synchronized.`);
+  } catch (err) {
+    console.warn("⚠️ [CloudSync Attendance Notice]:", err.message);
+  }
+}
+
+/**
+ * Synchronizes OrderSequences and CompanySettings.
+ */
+async function syncSettingsAndSequences(remotePool, localPool) {
+  try {
+    // 1. OrderSequences (High-watermark bidirectional sync)
+    const locSeqRes = await localPool.request().query(`
+      SELECT RestaurantId, SequenceDate, LastNumber FROM OrderSequences WITH (NOLOCK)
+    `);
+
+    for (const s of locSeqRes.recordset) {
+      const seqDate = safeDate(s.SequenceDate);
+      if (!seqDate) continue;
+
+      const remSeq = await remotePool.request()
+        .input("rid", sql.UniqueIdentifier, s.RestaurantId)
+        .input("dt", sql.Date, seqDate)
+        .query(`
+          SELECT LastNumber FROM OrderSequences WITH (NOLOCK)
+          WHERE RestaurantId = @rid AND SequenceDate = @dt
+        `);
+
+      if (remSeq.recordset.length > 0) {
+        const remoteLast = remSeq.recordset[0].LastNumber || 0;
+        if (s.LastNumber > remoteLast) {
+          await remotePool.request()
+            .input("rid", sql.UniqueIdentifier, s.RestaurantId)
+            .input("dt", sql.Date, seqDate)
+            .input("num", sql.Int, s.LastNumber)
+            .query("UPDATE OrderSequences SET LastNumber = @num WHERE RestaurantId = @rid AND SequenceDate = @dt");
+        } else if (remoteLast > s.LastNumber) {
+          await localPool.request()
+            .input("rid", sql.UniqueIdentifier, s.RestaurantId)
+            .input("dt", sql.Date, seqDate)
+            .input("num", sql.Int, remoteLast)
+            .query("UPDATE OrderSequences SET LastNumber = @num WHERE RestaurantId = @rid AND SequenceDate = @dt");
+        }
+      } else {
+        await remotePool.request()
+          .input("rid", sql.UniqueIdentifier, s.RestaurantId)
+          .input("dt", sql.Date, seqDate)
+          .input("num", sql.Int, s.LastNumber)
+          .query("INSERT INTO OrderSequences (RestaurantId, SequenceDate, LastNumber) VALUES (@rid, @dt, @num)")
+          .catch(() => {});
+      }
+    }
+
+    // 2. CompanySettings: Pull latest settings from Cloud if present
+    const remoteComp = await remotePool.request().query(`
+      SELECT TOP 1 * FROM CompanySettings WITH (NOLOCK)
+    `).catch(() => ({ recordset: [] }));
+
+    if (remoteComp.recordset.length > 0) {
+      const rc = remoteComp.recordset[0];
+      const localComp = await localPool.request().query("SELECT TOP 1 * FROM CompanySettings WITH (NOLOCK)");
+
+      if (localComp.recordset.length === 0) {
+        const remoteCols = async (tableName) => {
+          const res = await localPool.request().query(`
+            SELECT COLUMN_NAME, DATA_TYPE, COLUMNPROPERTY(object_id(TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IsIdentity
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = '${tableName}'
+          `);
+          return res.recordset.filter(c => c.IsIdentity !== 1);
+        };
+        const compCols = await remoteCols("CompanySettings");
+        const iReq = localPool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of compCols) {
+          const val = rc[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@cs_${col.COLUMN_NAME}`);
+            iReq.input(`cs_${col.COLUMN_NAME}`, val);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`INSERT INTO CompanySettings (${colNames.join(", ")}) VALUES (${paramNames.join(", ")})`);
+        }
+      }
+    }
+
+    console.log(`✅ [CloudSync] Settings & order sequences synchronized.`);
+  } catch (err) {
+    console.warn("⚠️ [CloudSync Settings Notice]:", err.message);
   }
 }
 
@@ -866,11 +1359,29 @@ async function getSyncStatus() {
     `).catch(() => ({ recordset: [] }));
     lastSyncTime = stRes.recordset[0]?.LastCloudSyncTime || null;
 
-    // Check Cloud connectivity
+    // Fast TCP socket probe so UI polling never hangs or lags
     try {
-      const rPool = await getRemotePool();
-      await rPool.request().query("SELECT 1 as ping");
-      isCloudReachable = true;
+      const net = require("net");
+      const host = process.env.REMOTE_DB_SERVER || "myerpcloud.dyndns.org";
+      const port = parseInt(process.env.REMOTE_DB_PORT || "9199");
+
+      isCloudReachable = await new Promise((resolve) => {
+        const socket = new net.Socket();
+        socket.setTimeout(3000);
+        socket.on("connect", () => {
+          socket.destroy();
+          resolve(true);
+        });
+        socket.on("timeout", () => {
+          socket.destroy();
+          resolve(false);
+        });
+        socket.on("error", () => {
+          socket.destroy();
+          resolve(false);
+        });
+        socket.connect(port, host);
+      });
     } catch {
       isCloudReachable = false;
     }
@@ -896,6 +1407,9 @@ module.exports = {
   pushSalesToCloud,
   syncLiveTablesAndCarts,
   pullMasterFromCloud,
+  syncMembersAndCreditCustomers,
+  syncStaffAttendance,
+  syncSettingsAndSequences,
   getSyncStatus,
   getRemotePool,
 };

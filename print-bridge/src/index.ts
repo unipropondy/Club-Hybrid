@@ -1,6 +1,7 @@
 import { app as electronApp } from 'electron';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
+import axios from 'axios';
 import * as path from 'path';
 import * as fs from 'fs';
 import { config } from './config';
@@ -19,6 +20,11 @@ import {
 } from './customerDisplay/CustomerDisplayManager';
 import { loadPersistedState, getCurrentState } from './customerDisplay/DisplayStateStore';
 import displayRouter from './customerDisplay/displayRoutes';
+import {
+  launchCounterPOSWindow,
+  focusCounterPOSWindow,
+} from './posWindow/CounterPOSManager';
+import { initTray } from './tray/TrayManager';
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -48,10 +54,17 @@ app.use(express.static(publicPath));
 // Request single-instance lock
 const gotTheLock = electronApp.requestSingleInstanceLock();
 if (!gotTheLock) {
-  logger.warn('[Electron] Another instance of UniPro Print Bridge is already running. Exiting...');
+  logger.warn('[Electron] Another instance of UniPro POS is already running. Exiting...');
   electronApp.quit();
   process.exit(0);
 }
+
+electronApp.on('second-instance', () => {
+  logger.info('[Electron] Second instance launch attempted - focusing existing Counter POS window.');
+  if (!focusCounterPOSWindow()) {
+    launchCounterPOSWindow();
+  }
+});
 
 // 1. GET /health - Local health check of the print bridge
 app.get('/health', (req: Request, res: Response) => {
@@ -260,11 +273,98 @@ app.post('/api/lan/orders', async (req: Request, res: Response) => {
   });
 });
 
-// Serve the static customer display files with extension-less HTML fallback
-app.use(express.static(path.join(electronApp.getAppPath(), 'customer-display-web'), { extensions: ['html'] }));
+// Resolves the web assets directory across development, unpacked, and packaged installer modes
+export function getWebAssetsDir(): string {
+  const candidates = [
+    path.join(electronApp.getAppPath(), 'customer-display-web'),
+    path.join(process.resourcesPath || '', 'customer-display-web'),
+    path.join(process.cwd(), 'customer-display-web'),
+    path.join(__dirname, '..', 'customer-display-web'),
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) return c;
+  }
+  return candidates[0];
+}
 
-// Mount new customer display endpoints
+// 5. Reverse proxy unhandled /api/* and /uploads/* to active backend
+app.use(async (req: Request, res: Response, next) => {
+  const isApi = req.path.startsWith('/api/');
+  const isUploads = req.path.startsWith('/uploads/');
+  if (!isApi && !isUploads) {
+    return next();
+  }
+
+  // Preserve local Print Bridge endpoints
+  const localEndpoints = [
+    '/api/config',
+    '/api/status',
+    '/api/logs',
+    '/api/printer/reconnect',
+    '/api/lan/orders',
+  ];
+  if (localEndpoints.includes(req.path)) {
+    return next();
+  }
+
+  const activeBackend = config.backends?.find((b) => b.enabled)?.url || 'http://localhost:5000';
+  try {
+    const targetUrl = `${activeBackend.replace(/\/+$/, '')}${req.originalUrl}`;
+    const headers: Record<string, any> = { ...req.headers };
+    try {
+      headers.host = new URL(activeBackend).host;
+    } catch (_) {}
+
+    const response = await axios({
+      method: req.method as any,
+      url: targetUrl,
+      data: ['GET', 'HEAD'].includes(req.method) ? undefined : req.body,
+      headers,
+      responseType: 'stream',
+      validateStatus: () => true,
+      timeout: 30000,
+    });
+
+    res.status(response.status);
+    Object.entries(response.headers).forEach(([k, v]) => {
+      if (v && k.toLowerCase() !== 'transfer-encoding') {
+        res.setHeader(k, v as any);
+      }
+    });
+    response.data.pipe(res);
+  } catch (err: any) {
+    logger.warn(`[Proxy] Failed to route ${req.method} ${req.path} to ${activeBackend}: ${err.message}`);
+    res.status(502).json({
+      success: false,
+      error: `Could not reach backend at ${activeBackend}: ${err.message}`,
+    });
+  }
+});
+
+// Serve the static POS web and customer display files
+const webAssetsDir = getWebAssetsDir();
+app.use(express.static(webAssetsDir, { extensions: ['html'] }));
+
+// Mount customer display endpoints
 app.use('/customer-display', displayRouter);
+
+// SPA fallback for React Native Web / Expo Router
+app.get('*', (req: Request, res: Response, next) => {
+  if (
+    req.path.startsWith('/api') ||
+    req.path.startsWith('/uploads') ||
+    req.path.startsWith('/settings') ||
+    req.path.startsWith('/customer-display') ||
+    req.path === '/health'
+  ) {
+    return next();
+  }
+  const indexPath = path.join(webAssetsDir, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  next();
+});
 
 // Initialize Electron Lifecycle
 electronApp.whenReady().then(() => {
@@ -278,7 +378,13 @@ electronApp.whenReady().then(() => {
     loadPersistedState();
     startMonitorWatcher();
 
-    // If a secondary display is already plugged in on start, launch display
+    // 1. Initialize System Tray Menu
+    initTray();
+
+    // 2. Launch Cashier POS Window on Primary Display
+    launchCounterPOSWindow();
+
+    // 3. If a secondary display is already plugged in on start, launch customer display
     if (getSecondaryDisplay()) {
       launchCustomerDisplay();
     }
@@ -300,7 +406,7 @@ electronApp.whenReady().then(() => {
   // Windows Startup Registry Configuration
   electronApp.setLoginItemSettings({
     openAtLogin: true,
-    name: 'UniPro Print Bridge',
+    name: 'UniPro POS Counter',
   });
 });
 

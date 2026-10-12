@@ -3012,9 +3012,17 @@ router.post("/save", async (req, res) => {
         const checkPool = await poolPromise;
         await logLoyaltyVisitAsync(checkPool, settlementId, finalBillNo, loyaltyPhone, loyaltyName, items);
       });
-    } else {
-      console.log(`[Loyalty Debug] Loyalty phone was empty or missing. Skipping trigger.`);
     }
+
+    // ☁️ POST-SAVE CLOUD SYNC TRIGGER (Immediate delta sync to Cloud ERP)
+    setImmediate(async () => {
+      try {
+        const { pushSalesToCloud } = require("../services/cloudSync.service");
+        await pushSalesToCloud(req.app.get("io"));
+      } catch (syncErr) {
+        console.warn("⚠️ [CloudSync Background Push Notice]:", syncErr.message);
+      }
+    });
 
     res.json({ 
       success: true, 

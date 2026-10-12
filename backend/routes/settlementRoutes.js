@@ -491,6 +491,15 @@ router.post('/finalize', authenticateToken, async (req, res) => {
           );
       `);
 
+    // ☁️ POST-FINALIZE CLOUD SYNC TRIGGER (Immediate background push)
+    setImmediate(() => {
+      try {
+        pushSalesToCloud(req.app.get("io")).catch(e => console.warn("⚠️ [Finalize Sync Notice]:", e.message));
+      } catch (e) {
+        console.warn("⚠️ [Finalize Sync Notice]:", e.message);
+      }
+    });
+
     res.json({ success: true });
   } catch (err) {
     console.error('Error finalizing:', err);
@@ -788,6 +797,15 @@ router.post('/cash-in', authenticateToken, async (req, res) => {
         VALUES (@CashInNo, @targetDate, @Amount, @Reason, @Remarks, @PaymentMode, @ReferenceNo, @TerminalCode, @CreatedBy, @targetDate, @targetDate, @AttachmentUrl)
       `);
 
+    // ☁️ POST-CASH-IN CLOUD SYNC TRIGGER (Immediate background push)
+    setImmediate(() => {
+      try {
+        pushSalesToCloud(req.app.get("io")).catch(e => console.warn("⚠️ [Cash-In Sync Notice]:", e.message));
+      } catch (e) {
+        console.warn("⚠️ [Cash-In Sync Notice]:", e.message);
+      }
+    });
+
     res.json({ success: true, data: result.recordset[0] });
   } catch (err) {
     console.error('Error creating cash in entry:', err);
@@ -883,6 +901,15 @@ router.post('/cash-out', authenticateToken, async (req, res) => {
         OUTPUT inserted.*
         VALUES (@CashOutNo, @targetDate, @Amount, @Reason, @Remarks, @PaymentMode, @ReferenceNo, @TerminalCode, @CreatedBy, @targetDate, @targetDate, @AttachmentUrl)
       `);
+
+    // ☁️ POST-CASH-OUT CLOUD SYNC TRIGGER (Immediate background push)
+    setImmediate(() => {
+      try {
+        pushSalesToCloud(req.app.get("io")).catch(e => console.warn("⚠️ [Cash-Out Sync Notice]:", e.message));
+      } catch (e) {
+        console.warn("⚠️ [Cash-Out Sync Notice]:", e.message);
+      }
+    });
 
     res.json({ success: true, data: result.recordset[0] });
   } catch (err) {
