@@ -207,10 +207,18 @@ export default function LoginScreen() {
 
   const openServerConfig = () => {
     try {
-      const cur = getApiUrl().replace(/^https?:\/\//, "");
-      const [h, p] = cur.split(":");
+      const cur = getApiUrl().trim();
+      const isHttps = cur.startsWith("https://");
+      const noProto = cur.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+      const [h, p] = noProto.split(":");
       setServerHost(h || "localhost");
-      setServerPort(p || "5000");
+      if (p) {
+        setServerPort(p);
+      } else if (h && (h.includes("railway.app") || isHttps)) {
+        setServerPort("");
+      } else {
+        setServerPort("5000");
+      }
     } catch (e) {
       setServerHost("192.168.0.236");
       setServerPort("5000");
@@ -221,29 +229,71 @@ export default function LoginScreen() {
   };
 
   const buildServerUrl = (host: string, port: string): string => {
-    let cleanHost = host.trim();
-    let cleanPort = port.trim();
+    let cleanHost = (host || "").trim();
+    let cleanPort = (port || "").trim();
 
-    // If user entered a full URL (e.g. https://clubdemo2026july-production.up.railway.app)
+    if (!cleanHost) return "";
+
+    // Strip trailing slashes
+    cleanHost = cleanHost.replace(/\/+$/, "");
+
+    // Extract protocol if explicitly given
+    let protocol = "";
     if (/^https?:\/\//i.test(cleanHost)) {
-      cleanHost = cleanHost.replace(/\/+$/, "");
-      if (cleanPort && cleanPort !== "443" && cleanPort !== "80" && !cleanHost.includes(`:${cleanPort}`)) {
-        return `${cleanHost}:${cleanPort}`;
+      const protoMatch = cleanHost.match(/^(https?:\/\/)/i);
+      if (protoMatch) {
+        protocol = protoMatch[1].toLowerCase();
+        cleanHost = cleanHost.substring(protocol.length);
       }
-      return cleanHost;
     }
 
-    // If host is a cloud domain (like railway.app, up.railway.app, vercel, etc.) -> default to HTTPS without port
-    if (cleanHost.includes("railway.app") || cleanHost.includes(".com") || cleanHost.includes(".io")) {
-      if (cleanPort && cleanPort !== "443" && cleanPort !== "80" && cleanPort !== "5000") {
-        return `https://${cleanHost}:${cleanPort}`;
+    cleanHost = cleanHost.replace(/\/+$/, "");
+
+    // Check if host contains an embedded port, e.g. "192.168.0.236:5000" or "app.railway.app:443"
+    const hostPortMatch = cleanHost.match(/^([^:/]+):(\d+)$/);
+    if (hostPortMatch) {
+      cleanHost = hostPortMatch[1];
+      if (!cleanPort) {
+        cleanPort = hostPortMatch[2];
       }
-      return `https://${cleanHost}`;
     }
 
-    // Local IP or DynDNS with custom port -> http://host:port (default 5000)
-    const effectivePort = cleanPort || "5000";
-    return `http://${cleanHost}:${effectivePort}`;
+    const isIpOrLocal = /^(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|\d+\.\d+\.\d+\.\d+)$/i.test(cleanHost);
+    const isRailway = cleanHost.toLowerCase().includes("railway.app");
+
+    // Default protocol: Railway or cloud domain -> https://, local IP/localhost -> http://
+    if (!protocol) {
+      protocol = (isRailway || !isIpOrLocal) ? "https://" : "http://";
+    }
+
+    // Force https for Railway
+    if (isRailway && protocol === "http://") {
+      protocol = "https://";
+    }
+
+    // Handle port:
+    // If port is left empty:
+    // - Local IP / localhost defaults to 5000
+    // - Railway / domain names have NO port appended (port left empty)
+    if (!cleanPort) {
+      if (isIpOrLocal) {
+        cleanPort = "5000";
+      }
+    } else {
+      // If Railway and port is 5000 (often lingering from local PC setting), 443, or 80, strip it
+      if (isRailway && (cleanPort === "5000" || cleanPort === "443" || cleanPort === "80")) {
+        cleanPort = "";
+      } else if (protocol === "https://" && cleanPort === "443") {
+        cleanPort = "";
+      } else if (protocol === "http://" && cleanPort === "80") {
+        cleanPort = "";
+      }
+    }
+
+    if (cleanPort) {
+      return `${protocol}${cleanHost}:${cleanPort}`;
+    }
+    return `${protocol}${cleanHost}`;
   };
 
   const handleTestConnection = async () => {
@@ -253,9 +303,17 @@ export default function LoginScreen() {
     const t0 = Date.now();
     try {
       const baseUrl = buildServerUrl(serverHost, serverPort);
+      if (!baseUrl) {
+        setPingStatus("failed");
+        setPingMessage("Please enter a valid host or URL.");
+        return;
+      }
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 6000);
+      const timer = setTimeout(() => ctrl.abort(), 8000);
       let res = await fetch(`${baseUrl}/api/health`, { signal: ctrl.signal }).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`${baseUrl}/health`, { signal: ctrl.signal }).catch(() => null);
+      }
       if (!res || !res.ok) {
         res = await fetch(`${baseUrl}/api/terminal`, { signal: ctrl.signal }).catch(() => null);
       }
@@ -276,6 +334,11 @@ export default function LoginScreen() {
 
   const handleSaveServerConfig = async () => {
     const newUrl = buildServerUrl(serverHost, serverPort);
+    if (!newUrl) {
+      setPingStatus("failed");
+      setPingMessage("Please enter a valid host or URL.");
+      return;
+    }
     await setApiUrl(newUrl);
     setCurrentUrlDisplay(newUrl);
     setShowServerModal(false);
@@ -605,7 +668,7 @@ export default function LoginScreen() {
               <View style={styles.modalHeader}>
                 <View style={styles.modalTitleRow}>
                   <Ionicons name="server-outline" size={20} color="#C084FC" />
-                  <Text style={styles.modalTitle}>Counter Server Setup</Text>
+                  <Text style={styles.modalTitle}>Server Connection Setup</Text>
                 </View>
                 <TouchableOpacity onPress={() => setShowServerModal(false)}>
                   <Ionicons name="close-circle" size={24} color="#6B7280" />
@@ -613,16 +676,16 @@ export default function LoginScreen() {
               </View>
 
               <Text style={styles.modalSubtitle}>
-                Connect this tablet directly to your Counter PC running the offline database.
+                Connect to Railway Cloud Backend or Local Counter PC.
               </Text>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>COUNTER PC IP ADDRESS</Text>
+                <Text style={styles.inputLabel}>SERVER HOST OR RAILWAY URL</Text>
                 <View style={styles.inputWrap}>
-                  <Ionicons name="wifi-outline" size={18} color="#5A5080" style={{ marginRight: 10 }} />
+                  <Ionicons name="globe-outline" size={18} color="#5A5080" style={{ marginRight: 10 }} />
                   <TextInput
                     style={styles.input}
-                    placeholder="e.g. 192.168.0.236"
+                    placeholder="e.g. https://your-app.up.railway.app or 192.168.0.236"
                     placeholderTextColor="#5A5080"
                     value={serverHost}
                     onChangeText={(t) => { setServerHost(t); setPingStatus("idle"); }}
@@ -631,23 +694,26 @@ export default function LoginScreen() {
                   />
                 </View>
                 <Text style={styles.modalHint}>
-                  Counter PC IP on store Wi-Fi (e.g. 192.168.0.236)
+                  Paste Railway URL or Counter PC IP (leave port empty for Railway)
                 </Text>
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>PORT</Text>
+                <Text style={styles.inputLabel}>PORT (LEAVE EMPTY FOR RAILWAY)</Text>
                 <View style={styles.inputWrap}>
                   <Ionicons name="hardware-chip-outline" size={18} color="#5A5080" style={{ marginRight: 10 }} />
                   <TextInput
                     style={styles.input}
-                    placeholder="5000"
+                    placeholder="Leave empty for Railway / 5000 for local PC"
                     placeholderTextColor="#5A5080"
                     value={serverPort}
                     onChangeText={(t) => { setServerPort(t); setPingStatus("idle"); }}
                     keyboardType="numeric"
                   />
                 </View>
+                <Text style={styles.modalHint}>
+                  Can leave empty for Railway or standard cloud domains
+                </Text>
               </View>
 
               {/* Ping / Test status */}

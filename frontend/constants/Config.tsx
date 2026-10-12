@@ -59,7 +59,8 @@ export const onApiUrlChange = (callback: (url: string) => void): (() => void) =>
 export const setApiUrl = async (newUrl: string): Promise<string> => {
   let formatted = newUrl.trim();
   if (!/^https?:\/\//i.test(formatted)) {
-    formatted = `http://${formatted}`;
+    const isLocal = /^(\d+\.\d+\.\d+\.\d+|localhost)/i.test(formatted);
+    formatted = isLocal ? `http://${formatted}` : `https://${formatted}`;
   }
   // Strip trailing slashes
   formatted = formatted.replace(/\/+$/, "");
@@ -89,7 +90,8 @@ export const initApiUrl = async (): Promise<string> => {
     if (saved && saved.trim()) {
       let formatted = saved.trim().replace(/\/+$/, "");
       if (!/^https?:\/\//i.test(formatted)) {
-        formatted = `http://${formatted}`;
+        const isLocal = /^(\d+\.\d+\.\d+\.\d+|localhost)/i.test(formatted);
+        formatted = isLocal ? `http://${formatted}` : `https://${formatted}`;
       }
       API_URL = formatted;
       urlListeners.forEach((fn) => fn(formatted));

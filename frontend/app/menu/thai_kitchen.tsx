@@ -1,4 +1,4 @@
-import { API_URL } from "@/constants/Config";
+import { API_URL, getApiUrl } from "@/constants/Config";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
