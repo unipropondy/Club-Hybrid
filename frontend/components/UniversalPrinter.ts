@@ -4,7 +4,29 @@ import { format } from "date-fns";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { Alert, Platform } from "react-native";
-import ThermalPrinter from "react-native-thermal-printer";
+import ThermalPrinterImport from "react-native-thermal-printer";
+
+// Safe wrapper around react-native-thermal-printer to prevent null-reference crashes
+const ThermalPrinter = {
+  printTcp: async (args: any) => {
+    if (!ThermalPrinterImport || typeof ThermalPrinterImport.printTcp !== "function") {
+      throw new Error("ThermalPrinter module is not available on this device/platform");
+    }
+    return ThermalPrinterImport.printTcp(args);
+  },
+  printBluetooth: async (args: any) => {
+    if (!ThermalPrinterImport || typeof ThermalPrinterImport.printBluetooth !== "function") {
+      throw new Error("ThermalPrinter module is not available on this device/platform");
+    }
+    return ThermalPrinterImport.printBluetooth(args);
+  },
+  getBluetoothDeviceList: async () => {
+    if (!ThermalPrinterImport || typeof (ThermalPrinterImport as any).getBluetoothDeviceList !== "function") {
+      return [];
+    }
+    return (ThermalPrinterImport as any).getBluetoothDeviceList();
+  }
+};
 import { API_URL } from "../constants/Config";
 import { formatToSingaporeDate, formatToSingaporeTime, formatToSingaporeDateTime } from "../utils/timezoneHelper";
 import BillPDFGenerator from "./BillPDFGenerator";
@@ -492,27 +514,48 @@ class UniversalPrinter {
     kdsPrinterIp?: string,
     isReprint: boolean = false,
   ): Promise<boolean> {
-    const { useGeneralSettingsStore } = await import("../stores/generalSettingsStore");
-    const { enableKDSPrint } = useGeneralSettingsStore.getState().settings;
-    if (!isReprint && enableKDSPrint === false) {
-      console.log("🖨️ [UniversalPrinter] KDS printing is disabled in settings.");
-      return false;
-    }
-
     if (Platform.OS === "web") {
       try {
-        // Try bridge directly — skip pre-flight isBridgeOnline() check which can falsely report offline
-        const colWidth = this.getAutoColWidth(kdsPrinterIp);
-        const text = this.formatKOTThermalText(orderData, "KDS_PRINT", colWidth);
-        console.log(`📡 [Web Print Bridge] Queueing KDS print (${colWidth} cols)`);
-        const success = await this.queuePrintJob(4, undefined, text, kdsPrinterIp);
+        const isOnline = await this.isBridgeOnline();
+        if (!isOnline) {
+          console.log("ðŸ“¡ [Web Print Bridge] Bridge is OFFLINE. Direct fallback to preview.");
+          const html = this.generateKOTHTML(orderData, "KDS_PRINT");
+          let frame = document.getElementById("kot-print-iframe") as HTMLIFrameElement;
+          if (!frame) {
+            frame = document.createElement("iframe");
+            frame.id = "kot-print-iframe";
+            frame.style.display = "none";
+            document.body.appendChild(frame);
+          }
+
+          const doc = frame.contentWindow?.document || frame.contentDocument;
+          if (doc) {
+            doc.open();
+            doc.write(html);
+            doc.close();
+
+            const triggerPrint = () => {
+              frame.contentWindow?.focus();
+              frame.contentWindow?.print();
+            };
+
+            frame.contentWindow?.addEventListener("load", triggerPrint);
+            setTimeout(triggerPrint, 50);
+          }
+          await this.logPrintJob(orderData.orderId, orderData.orderNo, "REPRINT");
+          return true;
+        }
+
+        const text = this.formatKOTThermalText(orderData, "KDS_PRINT");
+        console.log(`ðŸ“¡ [Web Print Bridge] Queueing KDS print`);
+        const success = await this.queuePrintJob(4, undefined, text);
         if (success) {
           await this.logPrintJob(orderData.orderId, orderData.orderNo, "REPRINT");
           return true;
         }
 
         // Web Fallback: If Print Bridge failed, trigger iframe preview
-        console.log("⚠️ [Web KDS Print] Print Bridge queue failed. Falling back to iframe print preview.");
+        console.log("âš ï¸ [Web KDS Print] Print Bridge queue failed. Falling back to iframe print preview.");
         const html = this.generateKOTHTML(orderData, "KDS_PRINT");
         let frame = document.getElementById("kot-print-iframe") as HTMLIFrameElement;
         if (!frame) {
@@ -577,6 +620,37 @@ class UniversalPrinter {
     return this.printKOT(orderData, userId, "KDS_PRINT", kdsPrinterIp);
   }
 
+  /** Create a uniquely-named hidden iframe for each KOT print to avoid concurrent overwrites */
+  private static createKOTFrame(): HTMLIFrameElement {
+    const frameId = `kot-print-iframe-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const frame = document.createElement("iframe");
+    frame.id = frameId;
+    frame.style.display = "none";
+    document.body.appendChild(frame);
+    // Auto-remove after 15s
+    setTimeout(() => { try { frame.remove(); } catch (_) {} }, 15000);
+    return frame;
+  }
+
+  /** Print KOT HTML via a fresh hidden iframe */
+  private static printKOTViaFrame(html: string, delay = 50): void {
+    const frame = this.createKOTFrame();
+    const doc = frame.contentWindow?.document || frame.contentDocument;
+    if (!doc) return;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    let printed = false;
+    const triggerPrint = () => {
+      if (printed) return;
+      printed = true;
+      frame.contentWindow?.focus();
+      frame.contentWindow?.print();
+    };
+    frame.contentWindow?.addEventListener("load", triggerPrint);
+    setTimeout(triggerPrint, delay);
+  }
+
   static async printKOT(
     orderData: any,
     userId?: string | number,
@@ -585,77 +659,33 @@ class UniversalPrinter {
   ): Promise<boolean> {
     if (Platform.OS === "web") {
       try {
-        // Try bridge directly — skip pre-flight isBridgeOnline() check which can falsely report offline
-        const colWidth = this.getAutoColWidth(printerIpOverride);
-        const text = this.formatKOTThermalText(orderData, type, colWidth);
+        const isOnline = await this.isBridgeOnline();
+        if (!isOnline) {
+          console.log("ðŸ“¡ [Web Print Bridge] Bridge is OFFLINE. Direct fallback to preview.");
+          this.printKOTViaFrame(this.generateKOTHTML(orderData, type), 50);
+          await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
+          return true;
+        }
+
+        const text = this.formatKOTThermalText(orderData, type);
         // Map kitchenCode or kitchenTypeValue
         const kitchenTypeValue = orderData.kitchenCode || orderData.KitchenCode || orderData.kitchenTypeValue || orderData.KitchenTypeValue || "0";
-        console.log(`📡 [Web Print Bridge] Queueing KOT (${colWidth} cols) to Kitchen type: ${kitchenTypeValue}`);
+        console.log(`ðŸ“¡ [Web Print Bridge] Queueing KOT to Kitchen type: ${kitchenTypeValue}`);
         const success = await this.queuePrintJob(2, kitchenTypeValue, text);
         if (success) {
           await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
           return true;
         }
 
-        // 🚀 Fallback: If Print Bridge failed or printer not detected on web, trigger iframe print preview immediately
-        console.log("⚠️ [Web KOT Print] Print Bridge queue failed. Falling back to iframe print preview.");
-        const html = this.generateKOTHTML(orderData, type);
-        let frame = document.getElementById("kot-print-iframe") as HTMLIFrameElement;
-        if (!frame) {
-          frame = document.createElement("iframe");
-          frame.id = "kot-print-iframe";
-          frame.style.display = "none";
-          document.body.appendChild(frame);
-        }
-
-        const doc = frame.contentWindow?.document || frame.contentDocument;
-        if (doc) {
-          doc.open();
-          doc.write(html);
-          doc.close();
-
-          let printed = false;
-          const triggerPrint = () => {
-            if (printed) return;
-            printed = true;
-            frame.contentWindow?.focus();
-            frame.contentWindow?.print();
-          };
-
-          frame.contentWindow?.addEventListener("load", triggerPrint);
-          setTimeout(triggerPrint, 800);
-        }
+        // ðŸš€ Fallback: If Print Bridge failed or printer not detected on web, trigger iframe print preview immediately
+        console.log("âš ï¸  [Web KOT Print] Print Bridge queue failed. Falling back to iframe print preview.");
+        this.printKOTViaFrame(this.generateKOTHTML(orderData, type), 800);
         await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
         return true;
       } catch (err) {
         console.warn("[Web Print Bridge] KOT Queue failed, falling back to iframe print preview:", err);
         try {
-          const html = this.generateKOTHTML(orderData, type);
-          let frame = document.getElementById("kot-print-iframe") as HTMLIFrameElement;
-          if (!frame) {
-            frame = document.createElement("iframe");
-            frame.id = "kot-print-iframe";
-            frame.style.display = "none";
-            document.body.appendChild(frame);
-          }
-
-          const doc = frame.contentWindow?.document || frame.contentDocument;
-          if (doc) {
-            doc.open();
-            doc.write(html);
-            doc.close();
-
-            let printed = false;
-            const triggerPrint = () => {
-              if (printed) return;
-              printed = true;
-              frame.contentWindow?.focus();
-              frame.contentWindow?.print();
-            };
-
-            frame.contentWindow?.addEventListener("load", triggerPrint);
-            setTimeout(triggerPrint, 800);
-          }
+          this.printKOTViaFrame(this.generateKOTHTML(orderData, type), 800);
           await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
           return true;
         } catch (fallbackErr) {
@@ -681,43 +711,33 @@ class UniversalPrinter {
             console.warn("Failed to fetch KDS printer IP:", err);
           }
         }
-        if (!targetIp) {
+        if (!targetIp && type !== "KDS_PRINT") {
           targetIp = company.printerIp || "";
         }
       }
 
-      // Check for device-specific local printer override (e.g. tablet belt printer)
-      try {
-        const localOverride = await AsyncStorage.getItem('@local_printer_override');
-        if (localOverride && localOverride.trim()) {
-          targetIp = localOverride.trim();
-        }
-      } catch (_) {}
-
-      // ✅ 1. Try Hardware Printer (WiFi or Bluetooth)
+      // âœ… 1. Try Hardware Printer (WiFi or Bluetooth)
       const hasConfiguredIp = targetIp && targetIp.trim().length > 0;
       if (hasConfiguredIp) {
         let isReachable = false;
         const isIp = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(targetIp.trim());
         if (isIp) {
-          // On Android native APK, thermal printers use raw TCP port 9100 without port 80 webserver
-          isReachable = Platform.OS === "android" ? true : await this.isIpReachable(targetIp);
+          isReachable = await this.isIpReachable(targetIp, 9100);
         } else {
-          isReachable = true; // Bluetooth MAC addresses
+          isReachable = true;
         }
 
         if (isReachable) {
           try {
-            const colWidth = this.getAutoColWidth(targetIp);
-            const text = this.formatKOTThermalText(orderData, type, colWidth);
+            const text = this.formatKOTThermalText(orderData, type);
 
             if (isIp) {
-              console.log(`🌐 KOT WiFi print to: ${targetIp} (${colWidth} cols)`);
+              console.log(`ðŸŒ KOT WiFi print to: ${targetIp}`);
               const printPromise = ThermalPrinter.printTcp({
                 ip: targetIp,
                 port: 9100,
                 payload: text,
-                mmFeedPaper: 60,
+                mmFeedPaper: 25,
               });
               const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error("WiFi Timeout")), 1500),
@@ -725,11 +745,11 @@ class UniversalPrinter {
               await Promise.race([printPromise, timeoutPromise]);
             } else {
               console.log(`🔵 KOT Bluetooth print to: ${targetIp}`);
-              await ThermalPrinter.getBluetoothDeviceList().catch(() => {});
+              await ThermalPrinterImport?.getBluetoothDeviceList?.().catch(() => {});
               const printPromise = ThermalPrinter.printBluetooth({
                 macAddress: targetIp,
                 payload: text,
-                mmFeedPaper: 60,
+                mmFeedPaper: 25,
               });
               const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error("BT Timeout")), 12000),
@@ -739,13 +759,13 @@ class UniversalPrinter {
             await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
             return true;
           } catch (printError) {
-            console.warn("❌ Hardware KOT failed/timeout, falling back directly to PDF...");
+            console.warn("âŒ Hardware KOT failed/timeout, falling back directly to PDF...");
           }
         } else {
-          console.warn(`❌ configured printer IP ${targetIp} not reachable, falling back directly to PDF...`);
+          console.warn(`âŒ configured printer IP ${targetIp} not reachable, falling back directly to PDF...`);
         }
       } else {
-        // ✅ 2. Try Sunmi direct print (Silent) (Only if IP is NOT entered)
+        // âœ… 2. Try Sunmi direct print (Silent) (Only if IP is NOT entered)
         const sunmiReady = await SunmiPrinterService.init().catch(() => false);
         if (sunmiReady) {
           try {
@@ -756,21 +776,20 @@ class UniversalPrinter {
             const printed = await Promise.race([printPromise, timeoutPromise]);
 
             if (printed) {
-              console.log("✅ KOT Printed with Sunmi - NO PREVIEW");
+              console.log("âœ… KOT Printed with Sunmi - NO PREVIEW");
               await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
               return true;
             }
           } catch (sunmiErr) {
-            console.warn("❌ Sunmi KOT failed/timeout:", sunmiErr);
+            console.warn("âŒ Sunmi KOT failed/timeout:", sunmiErr);
           }
         }
       }
 
-      // ✅ 3. Mobile Fallback (Android/iOS)
-
+      // âœ… 3. Mobile Fallback (Android/iOS)
       const { uri } = await Print.printToFileAsync({
         html,
-        width: 226, // 80mm approximate
+        width: 302, // 80mm at 96dpi (80 Ã— 3.7795 â‰ˆ 302px)
       });
 
       if (Platform.OS === "android" || Platform.OS === "ios") {
@@ -779,7 +798,7 @@ class UniversalPrinter {
         }
       }
 
-      // ✅ 4. LOG TO DATABASE (Audit Trail)
+      // âœ… 4. LOG TO DATABASE (Audit Trail)
       await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
       return true;
     } catch (error) {
@@ -799,16 +818,18 @@ class UniversalPrinter {
             : "NEW ORDER";
     title = title.replace(/\s*KOT\s*/gi, "").trim();
 
-    const items = data.items || [];
+    const items = (data.items || []).filter((item: any) => (item.status || item.Status || "").toUpperCase() !== "VOIDED");
     const tableNo = data.tableNo || "N/A";
     const deviceNo = data.deviceNo || "1";
     const orderNo = data.orderNo || data.orderId || "N/A";
-    const waiter = data.waiterName || "Staff";
-    const { showBillTime } = useGeneralSettingsStore.getState().settings;
-    const displayTime = showBillTime !== false;
+    const rawWaiter = data.waiterName || "Staff";
+    const isQuick = !!(data.isQuickServe || data.isQuick || data.isQuickServeMode || data.orderContext?.isQuickServe || data.context?.orderType === "QUICK_SERVE" || data.orderType === "QUICK_SERVE" || data.section === "QUICK_SERVE" || (typeof rawWaiter === "string" && rawWaiter.toLowerCase().includes("(quick serve)")));
+    const cleanTableNo = (tableNo || "").replace(/^table\s+/gi, "").trim() || tableNo;
+    const displayTable = isQuick ? (cleanTableNo.toLowerCase().includes("(quick serve)") ? cleanTableNo : `${cleanTableNo} (quick serve)`) : tableNo;
+    const waiter = isQuick ? (rawWaiter.replace(/\s*\(quick serve\)/gi, '').trim() || "Staff") : rawWaiter;
     const kotDateStr = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date());
-    const kotTimeStr = displayTime ? ` ${formatToSingaporeTime(new Date(), { hour: '2-digit', minute: '2-digit', hour12: false })}` : "";
-    const timestamp = `${kotDateStr}${kotTimeStr}`;
+    const kotTimeStr = formatToSingaporeTime(new Date(), { hour: '2-digit', minute: '2-digit', hour12: false });
+    const timestamp = `${kotDateStr} ${kotTimeStr}`;
     const kitchenName = data.kitchenName || "";
 
     return `
@@ -829,53 +850,54 @@ class UniversalPrinter {
             background: #fff;
           }
           .kot-container { 
-            padding: 1mm 2mm; 
+            padding: 15mm 2mm 1mm 2mm; 
             width: 76mm;
           }
           
           .header-box { 
             background: #000 !important; 
             color: #fff !important; 
-            padding: 3px 8px; 
-            text-align: left; 
+            padding: 3px 5px; 
+            text-align: center; 
             font-weight: bold; 
-            font-size: 24px; 
-            display: inline-block;
+            font-size: 15px; 
+            display: block;
             margin-bottom: 2px;
             text-transform: uppercase;
             -webkit-print-color-adjust: exact;
           }
           
           .timestamp {
-            font-size: 14px;
+            font-size: 10px;
             font-weight: bold;
-            margin-bottom: 8px;
+            margin-bottom: 3px;
             color: #333;
+            text-align: center;
           }
           
           .table-info {
             display: flex;
             justify-content: space-between;
-            border-bottom: 2px dashed #000;
-            padding: 3px 0;
-            margin-bottom: 6px;
-            font-size: 26px;
-            font-weight: bold;
+            border-bottom: 1.5px dashed #000;
+            padding: 1px 0;
+            margin-bottom: 2px;
+            font-size: 14px;
+            font-weight: 900;
           }
           
           .headers {
             display: flex;
-            border-bottom: 1.5px dashed #000;
-            padding: 3px 0;
-            font-size: 16px;
+            border-bottom: 1px dashed #000;
+            padding: 1px 0;
+            font-size: 11px;
             font-weight: bold;
             text-transform: uppercase;
           }
-          .qty-head { width: 50px; margin-right: 8px; }
+          .qty-head { width: 30px; margin-right: 4px; }
           
           .item-row {
-            border-bottom: 1.5px solid #000;
-            padding: 8px 0;
+            border-bottom: 1px solid #000;
+            padding: 3px 0;
           }
           
           .item-main {
@@ -884,57 +906,62 @@ class UniversalPrinter {
           }
           
           .item-qty {
-            font-size: 20px;
-            font-weight: 600;
-            width: 50px;
+            font-size: 22px;
+            font-weight: 900;
+            width: 30px;
             line-height: 1;
-            margin-right: 8px;
+            margin-right: 4px;
           }
           
           .item-name {
-            font-size: 16px;
-            font-weight: 600;
+            font-size: 20px;
+            font-weight: 900;
             flex: 1;
             line-height: 1.1;
           }
           
           .modifier-list {
-            margin-left: 58px;
-            margin-top: 3px;
+            margin-left: 34px;
+            margin-top: 1px;
           }
           
           .modifier-item {
-            font-size: 18px;
-            font-weight: bold;
+            font-size: 16px;
+            font-weight: 900;
+            color: #000;
             display: block;
           }
           
           .remarks {
-            margin-left: 58px;
+            margin-left: 34px;
             font-size: 16px;
-            font-weight: bold;
-            font-style: italic;
-            margin-top: 4px;
+            font-weight: 900;
+            margin-top: 2px;
           }
           
           .footer {
-            margin-top: 10px;
-            font-size: 14px;
+            margin-top: 4px;
+            font-size: 10px;
             font-weight: bold;
             font-family: monospace;
           }
           
           .kitchen-name {
             text-align: center;
-            font-size: 24px;
+            font-size: 18px;
             font-weight: bold;
-            margin-top: 16px;
+            margin-top: 6px;
             text-transform: uppercase;
-            border: 2px solid #000;
-            padding: 6px;
+            border-top: 1.5px dashed #000;
+            border-bottom: 1.5px dashed #000;
+            padding: 3px 0;
           }
           
           @media print {
+            @page {
+              size: 80mm auto;
+              margin: 0;
+            }
             body { width: 80mm; }
             .header-box { -webkit-print-color-adjust: exact; }
           }
@@ -945,8 +972,8 @@ class UniversalPrinter {
           <div class="header-box">${title}</div>
           <div class="timestamp">${timestamp}</div>
           
-          <div class="table-info">
-            <span>Table:${tableNo}</span>
+          <div class="table-info" style="font-size: 18px; font-weight: 900; white-space: nowrap;">
+            <span>TABLE: ${displayTable}</span>
           </div>
           
           <div class="headers">
@@ -966,45 +993,52 @@ class UniversalPrinter {
 
                 return Object.entries(kitchenGroups).map(([kName, groupItems]) => {
                   return `
-                    <div style="font-size: 18px; font-weight: bold; margin-top: 15px; border-bottom: 2px solid #000; padding-bottom: 3px; text-transform: uppercase;">
+                    <div style="font-size: 18px; font-weight: bold; margin-top: 10px; border-bottom: 1.5px solid #000; padding-bottom: 2px; text-transform: uppercase;">
                       <b>${kName}</b>
                     </div>
                     ${groupItems.map((item: any) => {
                       const noteText = item.note || item.notes || item.Remarks || item.remarks;
-                      const comboSels = item.comboSelections || 
+                      const rawCombo = item.comboSelections || item.selectedCombos || item.combos ||
                         (typeof item.ComboDetailsJSON === 'string' && item.ComboDetailsJSON 
-                          ? (() => { try { const p = JSON.parse(item.ComboDetailsJSON); return Array.isArray(p) ? p : p.groups; } catch { return undefined; } })() 
-                          : (Array.isArray(item.ComboDetailsJSON) ? item.ComboDetailsJSON : undefined)) || [];
-                      const hasCombo = Array.isArray(comboSels) && comboSels.length > 0;
+                          ? (() => { try { const p = JSON.parse(item.ComboDetailsJSON); return Array.isArray(p) ? p : (p.groups || p.items || p.selections || []); } catch { return undefined; } })() 
+                          : (Array.isArray(item.ComboDetailsJSON) ? item.ComboDetailsJSON : (typeof item.ComboDetailsJSON === 'object' && item.ComboDetailsJSON ? (item.ComboDetailsJSON.groups || item.ComboDetailsJSON.items || []) : undefined)));
+                      const comboSels = Array.isArray(rawCombo) ? rawCombo : [];
+                      const hasCombo = comboSels.length > 0;
 
                       return `
                         <div class="item-row">
                           <div class="item-main">
                             <div class="item-qty">${item.quantity || item.qty || 1}</div>
                             <div class="item-name">
-                              ${(item.name || "").replace(/\n/g, '<br/>')}
-                              ${item.songName || item.SongName ? `<div style="font-size: 14px; font-weight: normal; color: #555; margin-top: 2px;">🎵 ${item.songName || item.SongName}</div>` : ''}
+                              <b>${(item.name || "").replace(/\n/g, '<br/>')}</b>
+                              ${item.songName || item.SongName ? `<div style="font-size: 12px; font-weight: normal; color: #555; margin-top: 4px;">🎵 ${item.songName || item.SongName}</div>` : ''}
                             </div>
                           </div>
                           ${
                             item.isTakeaway || item.IsTakeaway || item.isTakeAway || item.IsTakeAway
-                              ? `<div class="modifier-list"><span class="modifier-item" style="font-size: 14px; font-weight: normal; color: #555;">- Takeaway</span></div>`
+                              ? `<div class="modifier-list"><span class="modifier-item">- Takeaway</span></div>`
                               : ""
                           }
                           ${
                             item.modifiers && item.modifiers.length > 0
-                              ? `<div class="modifier-list">${item.modifiers.map((m: any) => `<span class="modifier-item">- ${m.name || m.ModifierName}</span>`).join("")}</div>`
+                              ? `<div class="modifier-list">${item.modifiers.map((m: any) => `<span class="modifier-item">+ ${m.name || m.ModifierName}</span>`).join("")}</div>`
                               : ""
                           }
                           ${
                             hasCombo
-                              ? `<div class="modifier-list">${comboSels.map((g: any) => `
-                                  <div style="font-weight: bold; margin-top: 2px;">${g.groupName}:</div>
-                                  ${g.items?.map((opt: any) => `<span class="modifier-item" style="padding-left: 10px;">↳ ${opt.name}</span>`).join("")}
-                                `).join("")}</div>`
+                              ? `<div class="modifier-list">${comboSels.map((g: any) => {
+                                  const choices = g.items || g.dishes || g.selections || g.selectedDishes || (Array.isArray(g) ? g : (g.name || g.DishName || g.itemName ? [g] : []));
+                                  if (Array.isArray(choices)) {
+                                    return choices.map((opt: any) => {
+                                      const optName = opt.name || opt.DishName || opt.itemName || "";
+                                      return optName ? `<span class="modifier-item">- ${optName}</span>` : "";
+                                    }).join("");
+                                  }
+                                  return "";
+                                }).join("")}</div>`
                               : ""
                           }
-                          ${noteText ? `<div class="remarks">* NOTE: ${noteText}</div>` : ""}
+                          ${noteText ? `<div class="remarks">* ${noteText}</div>` : ""}
                         </div>
                       `;
                     }).join("")}
@@ -1014,19 +1048,20 @@ class UniversalPrinter {
 
               return items.map((item: any) => {
                 const noteText = item.note || item.notes || item.Remarks || item.remarks;
-                const comboSels = item.comboSelections || 
+                const rawCombo = item.comboSelections || item.selectedCombos || item.combos || 
                   (typeof item.ComboDetailsJSON === 'string' && item.ComboDetailsJSON 
-                    ? (() => { try { const p = JSON.parse(item.ComboDetailsJSON); return Array.isArray(p) ? p : p.groups; } catch { return undefined; } })() 
-                    : (Array.isArray(item.ComboDetailsJSON) ? item.ComboDetailsJSON : undefined)) || [];
-                const hasCombo = Array.isArray(comboSels) && comboSels.length > 0;
+                    ? (() => { try { const p = JSON.parse(item.ComboDetailsJSON); return Array.isArray(p) ? p : (p.groups || p.items || p.selections || []); } catch { return undefined; } })() 
+                    : (Array.isArray(item.ComboDetailsJSON) ? item.ComboDetailsJSON : (typeof item.ComboDetailsJSON === 'object' && item.ComboDetailsJSON ? (item.ComboDetailsJSON.groups || item.ComboDetailsJSON.items || []) : undefined)));
+                const comboSels = Array.isArray(rawCombo) ? rawCombo : [];
+                const hasCombo = comboSels.length > 0;
 
                 return `
                   <div class="item-row">
                     <div class="item-main">
                       <div class="item-qty">${item.quantity || item.qty || 1}</div>
                       <div class="item-name">
-                        ${(item.name || "").replace(/\n/g, '<br/>')}
-                        ${item.songName || item.SongName ? `<div style="font-size: 14px; font-weight: normal; color: #555; margin-top: 2px;">🎵 ${item.songName || item.SongName}</div>` : ''}
+                        <b>${(item.name || "").replace(/\n/g, '<br/>')}</b>
+                        ${item.songName || item.SongName ? `<div style="font-size: 12px; font-weight: normal; color: #555; margin-top: 4px;">🎵 ${item.songName || item.SongName}</div>` : ''}
                       </div>
                     </div>
                     ${
@@ -1036,7 +1071,7 @@ class UniversalPrinter {
                       item.IsTakeAway
                         ? `
                       <div class="modifier-list">
-                        <span class="modifier-item" style="font-size: 14px; font-weight: normal; color: #555;">- Takeaway</span>
+                        <span class="modifier-item">- Takeaway</span>
                       </div>
                     `
                         : ""
@@ -1048,7 +1083,7 @@ class UniversalPrinter {
                         ${item.modifiers
                           .map(
                             (m: any) => `
-                          <span class="modifier-item">- ${m.name || m.ModifierName}</span>
+                          <span class="modifier-item">+ ${m.name || m.ModifierName}</span>
                         `,
                           )
                           .join("")}
@@ -1061,12 +1096,16 @@ class UniversalPrinter {
                         ? `
                       <div class="modifier-list">
                         ${comboSels
-                          .map(
-                            (g: any) => `
-                          <div style="font-weight: bold; margin-top: 2px;">${g.groupName}:</div>
-                          ${g.items?.map((opt: any) => `<span class="modifier-item" style="padding-left: 10px;">↳ ${opt.name}</span>`).join("")}
-                        `,
-                          )
+                          .map((g: any) => {
+                            const choices = g.items || g.dishes || g.selections || g.selectedDishes || (Array.isArray(g) ? g : (g.name || g.DishName || g.itemName ? [g] : []));
+                            if (Array.isArray(choices)) {
+                              return choices.map((opt: any) => {
+                                const optName = opt.name || opt.DishName || opt.itemName || "";
+                                return optName ? `<span class="modifier-item">- ${optName}</span>` : "";
+                              }).join("");
+                            }
+                            return "";
+                          })
                           .join("")}
                       </div>
                     `
@@ -1076,7 +1115,7 @@ class UniversalPrinter {
                       noteText
                         ? `
                       <div class="remarks">
-                        * NOTE: ${noteText}
+                        * ${noteText}
                       </div>
                     `
                         : ""
@@ -1091,172 +1130,201 @@ class UniversalPrinter {
             Order By : ${waiter} #OR-${orderNo}
           </div>
 
-          ${kitchenName && kitchenName !== "KDS" ? `<div class="kitchen-name">${kitchenName}</div>` : ""}
+          ${kitchenName && kitchenName !== "KDS" ? `<div class="kitchen-name">${kitchenName.toUpperCase()}${tableNo && tableNo !== "N/A" ? `  /  T.NO: ${tableNo}` : ""}</div>` : ""}
         </div>
       </body>
       </html>
     `;
   }
 
-  // ── wrapText: Splits text into chunks of at most maxLen chars ──
-  private static wrapTextKOT(text: string, maxLen: number): string[] {
-    const words = text.split(' ');
-    const lines: string[] = [];
-    let current = '';
-    for (const word of words) {
-      if ((current + (current ? ' ' : '') + word).length <= maxLen) {
-        current += (current ? ' ' : '') + word;
-      } else {
-        if (current) lines.push(current);
-        current = word.length > maxLen ? word.substring(0, maxLen) : word;
-      }
-    }
-    if (current) lines.push(current);
-    return lines.length > 0 ? lines : [""];
-  }
-
-  private static formatKOTThermalText(data: any, type: string, colWidth: number = 48): string {
-    const is58 = colWidth <= 32;
-    const effectiveWidth = is58 ? 32 : (colWidth || 48);
-    const itemWrap = is58 ? 26 : (effectiveWidth - 6);
-    const modWrap = is58 ? 22 : (effectiveWidth - 10);
-    const lineDash = "[L]" + "-".repeat(effectiveWidth) + "\n";
-    const lineEq = "[C]" + "=".repeat(effectiveWidth) + "\n";
-
+  private static formatKOTThermalText(data: any, type: string = "NEW"): string {
     const title =
-      type === "KDS_PRINT"
-        ? "KDS PRINT"
-        : type === "REPRINT"
-          ? "REPRINT"
-          : type === "ADDITIONAL"
-            ? "ADDITIONAL"
-            : "NEW ORDER";
-    const items = data.items || [];
-    const tableNo = data.tableNo || "N/A";
-    const waiter = data.waiterName || "Staff";
-    const orderNo = data.orderNo || data.orderId || "";
+      type === "KDS_PRINT"    ? "KDS PRINT"
+      : type === "REPRINT"    ? "REPRINT"
+      : type === "ADDITIONAL" ? "ADDITIONAL ORDER"
+      : "NEW ORDER";
+
+    const items       = (data.items || []).filter((i: any) => (i.status || i.Status || "").toUpperCase() !== "VOIDED");
+    const tableNo     = data.tableNo || "N/A";
+    const rawWaiter   = data.waiterName || "Staff";
+    const isQuick     = !!(data.isQuickServe || data.isQuick || data.isQuickServeMode || data.orderContext?.isQuickServe || data.context?.orderType === "QUICK_SERVE" || data.orderType === "QUICK_SERVE" || data.section === "QUICK_SERVE" || (typeof rawWaiter === "string" && rawWaiter.toLowerCase().includes("(quick serve)")));
+    const cleanTableNo = (tableNo || "").replace(/^table\s+/gi, "").trim() || tableNo;
+    const displayTable = isQuick ? (cleanTableNo.toLowerCase().includes("(quick serve)") ? cleanTableNo : `${cleanTableNo} (quick serve)`) : tableNo;
+    const waiter      = isQuick ? (rawWaiter.replace(/\s*\(quick serve\)/gi, '').trim() || "Staff") : rawWaiter;
+    const orderNo     = data.orderNo || data.orderId || "";
     const kitchenName = data.kitchenName || "";
 
-    let text = lineEq;
-    text += `[C]<B>${title}</B>\n`;
-    const { showBillTime } = useGeneralSettingsStore.getState().settings;
-    const displayTime = showBillTime !== false;
-    const kotDateStr = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: '2-digit', year: '2-digit' }).format(new Date());
-    const kotTimeStr = displayTime ? ` ${formatToSingaporeTime(new Date(), { hour: '2-digit', minute: '2-digit', hour12: false })}` : "";
-    text += `[C]${kotDateStr}${kotTimeStr}\n`;
-    text += lineDash;
+    const kotDateStr = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Singapore", day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date()).replace(/[\u202F\u00A0\uFEFF]/g, ' ');
+    const kotTimeStr = formatToSingaporeTime(new Date(), { hour: "2-digit", minute: "2-digit", hour12: false }).replace(/[\u202F\u00A0\uFEFF]/g, ' ');
 
-    // 🏠 Centered table number
-    text += `[C]<B>TABLE: ${tableNo}</B>\n`;
-    text += lineDash;
+    const DIV = "[L]------------------------------------------------\n";
 
-    text += is58 ? "[L]QTY  ITEM\n" : "[L]QTY    ITEM\n";
-    text += lineDash;
+    const DISH_WRAP = 20;
+    const BIG_MOD_WRAP = 20;
 
-    // ── Shared per-item formatter ──
+    const wrapText = (str: string, maxChars: number): string[] => {
+      const words = String(str || "").split(" ");
+      const result: string[] = [];
+      let current = "";
+      for (const word of words) {
+        if (!word) continue;
+        if (!current) {
+          current = word;
+        } else if ((current + " " + word).length <= maxChars) {
+          current += " " + word;
+        } else {
+          result.push(current);
+          current = word;
+        }
+      }
+      if (current) result.push(current);
+      return result.length ? result : [""];
+    };
+
     const formatItem = (item: any): string => {
       let t = "";
-      const qtyNum = item.quantity || item.qty || 1;
-      const itemName = (item.name || item.DishName || "").replace(/\n/g, " ");
+      const qtyNum   = item.quantity || item.qty || 1;
+      const itemName = item.name || item.DishName || "";
 
-      // Item name: bold, wrap dynamically based on paper width
-      this.wrapTextKOT(itemName, itemWrap).forEach((chunk: string, idx: number) => {
-        if (idx === 0) t += `[L]<B>[${qtyNum}] ${chunk}</B>\n`;
-        else           t += `[L]<B>    ${chunk}</B>\n`;
+      wrapText(itemName.replace(/\n/g, " "), DISH_WRAP).forEach((chunk: string, idx: number) => {
+        if (idx === 0) t += `[L]<font size='big'><B>[${qtyNum}] ${chunk}</B></font>\n`;
+        else           t += `[L]<font size='big'><B>    ${chunk}</B></font>\n`;
       });
 
-      // Song name
       const songName = item.songName || item.SongName || "";
-      if (songName) t += `[L]        <B>\u266a ${songName}</B>\n`;
+      if (songName) t += `[L]<font size='big'><B>  ♪ ${songName}</B></font>\n`;
 
-      // Takeaway flag
       const isTw = !!(item.isTakeaway || item.IsTakeaway || item.isTakeAway || item.IsTakeAway);
-      if (isTw) t += `[L]        <B>>> TAKEAWAY <<</B>\n`;
+      if (isTw) t += `[L]<font size='big'><B>  >> TAKEAWAY <<</B></font>\n`;
 
-      // Modifiers: bold, 8-space indent, wrap at modWrap
       if (item.modifiers && item.modifiers.length > 0) {
         item.modifiers.forEach((m: any) => {
-          const modName = (m.ModifierName || m.modifierName || m.name || m.ModifierNameEn || "").trim();
+          const modName = m.ModifierName || m.modifierName || m.name || m.ModifierNameEn || "";
           if (modName) {
-            this.wrapTextKOT(modName, modWrap).forEach((chunk: string, idx: number) => {
-              t += idx === 0 ? `[L]        <B>+ ${chunk}</B>\n` : `[L]          <B>${chunk}</B>\n`;
+            wrapText(modName, BIG_MOD_WRAP).forEach((chunk: string, idx: number) => {
+              t += idx === 0 ? `[L]<font size='big'><B>  + ${chunk}</B></font>\n` : `[L]<font size='big'><B>    ${chunk}</B></font>\n`;
             });
           }
         });
       }
 
-      // Combo selections with ComboDetailsJSON fallback
-      let comboSels = item.comboSelections;
+      let comboSels = item.comboSelections || item.selectedCombos || item.combos;
       if (!comboSels || (Array.isArray(comboSels) && comboSels.length === 0)) {
         const rawCombo = item.ComboDetailsJSON || item.comboDetailsJSON || item.ComboDetails || item.comboDetails;
         if (rawCombo) {
           if (typeof rawCombo === 'string') {
             try {
               const parsed = JSON.parse(rawCombo);
-              comboSels = Array.isArray(parsed) ? parsed : (parsed.groups || parsed.items || []);
-            } catch { comboSels = []; }
+              comboSels = Array.isArray(parsed) ? parsed : (parsed.groups || parsed.items || parsed.selections || []);
+            } catch (e) {
+              comboSels = [];
+            }
           } else if (Array.isArray(rawCombo)) {
             comboSels = rawCombo;
+          } else if (typeof rawCombo === 'object') {
+            comboSels = rawCombo.groups || rawCombo.items || rawCombo.selections || [];
           }
         }
       }
-      if (comboSels && Array.isArray(comboSels) && comboSels.length > 0) {
+
+      if (Array.isArray(comboSels) && comboSels.length > 0) {
         comboSels.forEach((g: any) => {
-          t += `[L]    ${g.groupName}:\n`;
-          g.items?.forEach((opt: any) => {
-            t += `[L]      \u21b3 ${opt.name}\n`;
-          });
+          const choices = g.items || g.dishes || g.selections || g.selectedDishes || (Array.isArray(g) ? g : (g.name || g.DishName || g.itemName ? [g] : []));
+          if (Array.isArray(choices)) {
+            choices.forEach((opt: any) => {
+              const optName = opt.name || opt.DishName || opt.itemName || "";
+              if (optName) {
+                wrapText(optName, BIG_MOD_WRAP).forEach((chunk: string, idx: number) => {
+                  t += idx === 0 ? `[L]<font size='big'><B>  - ${chunk}</B></font>\n` : `[L]<font size='big'><B>    ${chunk}</B></font>\n`;
+                });
+              }
+            });
+          }
         });
       }
 
-      // Note
       const noteText = item.note || item.notes || item.Remarks || item.remarks;
       if (noteText) {
-        const noteWrap = is58 ? 24 : (effectiveWidth - 12);
-        this.wrapTextKOT(String(noteText), noteWrap).forEach((chunk: string, idx: number) => {
-          t += idx === 0 ? `[L]    * NOTE: ${chunk}\n` : `[L]            ${chunk}\n`;
+        wrapText(noteText, BIG_MOD_WRAP).forEach((chunk: string, idx: number) => {
+          t += idx === 0 ? `[L]<font size='big'><B>  * ${chunk}</B></font>\n` : `[L]<font size='big'><B>    ${chunk}</B></font>\n`;
         });
       }
 
       return t;
     };
 
+    let text = "";
+    text += "[L]\n".repeat(4);
+    text += `[C]<font size='big'><B>${title}</B></font>\n`;
+    text += `[C]<B>${kotDateStr}  ${kotTimeStr}</B>\n`;
+    text += DIV;
+
+    text += `[C]<font size='big'><B>TABLE: ${displayTable}</B></font>\n`;
+    text += DIV;
+
+    text += "[L]<B>QTY  ITEM</B>\n";
+    text += DIV;
+
     if (type === "KDS_PRINT") {
-      const kitchenGroups: Record<string, any[]> = {};
+      const groups: Record<string, any[]> = {};
       items.forEach((item: any) => {
-        const kName = (item.KitchenTypeName || item.kitchenTypeName || item.dishGroupName || item.categoryName || "KITCHEN").toUpperCase().trim();
-        if (!kitchenGroups[kName]) kitchenGroups[kName] = [];
-        kitchenGroups[kName].push(item);
+        const k = (item.KitchenTypeName || item.kitchenTypeName || item.dishGroupName || item.categoryName || "KITCHEN").toUpperCase().trim();
+        if (!groups[k]) groups[k] = [];
+        groups[k].push(item);
       });
 
-      for (const [kName, groupItems] of Object.entries(kitchenGroups)) {
-        text += `\n[L]<B>${kName}</B>\n`;
-        text += lineDash;
-        groupItems.forEach((item: any) => {
+      for (const [kName, groupItems] of Object.entries(groups)) {
+        text += `[C]<B>--- ${kName} ---</B>\n`;
+        text += DIV;
+        groupItems.forEach((item: any, idx: number) => {
           text += formatItem(item);
+          if (idx < groupItems.length - 1) text += "[L]\n";
         });
-        text += lineDash;
+        text += DIV;
       }
     } else {
+      const kotGroups: Record<string, any[]> = {};
       items.forEach((item: any) => {
-        text += formatItem(item);
-        text += lineDash;
+        const k = (item.KitchenTypeName || item.kitchenTypeName || item.dishGroupName || item.categoryName || "KITCHEN").toUpperCase().trim();
+        if (!kotGroups[k]) kotGroups[k] = [];
+        kotGroups[k].push(item);
+      });
+
+      const kotGroupEntries = Object.entries(kotGroups);
+      kotGroupEntries.forEach(([kName, groupItems]: [string, any[]], gIdx: number) => {
+        if (kotGroupEntries.length > 1) {
+          text += `[C]<B>--- ${kName} ---</B>\n`;
+          text += DIV;
+        }
+        groupItems.forEach((item: any, idx: number) => {
+          text += formatItem(item);
+          if (idx < groupItems.length - 1) text += "[L]\n";
+        });
+        text += DIV;
       });
     }
 
-    if (effectiveWidth >= 40) {
-      text += this.formatTwoCols(`Order By: ${waiter}`, `Order #: ${orderNo}`, effectiveWidth);
-    } else {
-      text += `[L]Order By: ${waiter}\n`;
-      text += `[L]Order #: ${orderNo}\n`;
+    text += `[L]<B>Order By : ${waiter}</B>\n`;
+    text += `[L]<B>Order No : ${orderNo}</B>\n`;
+
+    if (type !== "KDS_PRINT") {
+      const kotLabel = kitchenName && kitchenName !== "KDS"
+        ? (tableNo && tableNo !== "N/A"
+            ? `${kitchenName.toUpperCase()}  /  T.NO : ${tableNo}`
+            : kitchenName.toUpperCase())
+        : (tableNo && tableNo !== "N/A"
+            ? `T.NO : ${tableNo}`
+            : "");
+      if (kotLabel) {
+        text += DIV;
+        text += `[C]<B>${kotLabel}</B>\n`;
+        text += DIV;
+      }
     }
 
-    if (kitchenName && kitchenName !== "KDS") {
-      text += lineDash;
-      text += `[C]<B>${kitchenName.toUpperCase()}</B>\n`;
-    }
+    // ── FEED LINES at end ──
+    text += "[L]\n";
 
-    text += "\n\n";
     return text;
   }
 
@@ -1717,20 +1785,21 @@ class UniversalPrinter {
     const lineEq = "[C]" + "=".repeat(effectiveWidth) + "\n";
     const lineDash = "[L]" + "-".repeat(effectiveWidth) + "\n";
 
-    let text = lineEq;
+    let text = "\n\n" + lineEq;
     if (isCheckout) {
-      text += "[C]<B>CHECKOUT BILL</B>\n";
+      text += "[C]<font size='big'><B>CHECKOUT BILL</B></font>\n";
       text += "[C]<B>PAYMENT PENDING</B>\n";
     } else {
-      text += "[C]<B>PAYMENT RECEIPT</B>\n";
+      text += "[C]<font size='big'><B>PAYMENT RECEIPT</B></font>\n";
     }
     text += lineEq;
 
-    // Header Info
-    text += `[C]<B>${(company.name || "YOUR STORE").toUpperCase()}</B>\n`;
+    // Header Info (Store Name in Big Bold)
+    text += `[C]<font size='big'><B>${(company.name || "YOUR STORE").toUpperCase()}</B></font>\n`;
     if (company.address) text += `[C]${company.address}\n`;
     if (company.phone) text += `[C]Tel: ${company.phone}\n`;
     if (company.email) text += `[C]Email: ${company.email}\n`;
+    if (company.gstNo) text += `[C]GST: ${company.gstNo}\n`;
     text += lineDash;
 
     const parseLocalDate = (d: any) => {
@@ -1744,27 +1813,37 @@ class UniversalPrinter {
                      saleData.date ? parseLocalDate(saleData.date) : 
                      new Date();
 
-    text += `[L]Bill No: ${saleData.invoiceNumber || saleData.id || saleData.orderId || ""}\n`;
-    if (saleData.tableNo) {
-      text += `[L]<B>TABLE: ${saleData.tableNo}</B>\n`;
-    }
     const dateFormatted = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: '2-digit', year: 'numeric' }).format(saleDate);
     const { showBillTime } = useGeneralSettingsStore.getState().settings;
     const displayTime = showBillTime !== false;
     const timeFormatted = displayTime ? ` ${formatToSingaporeTime(saleDate)}` : "";
-    text += `[L]Date: ${dateFormatted}${timeFormatted}\n`;
+
+    if (saleData.tableNo) {
+      const cleanTableNo = /^\d+$/.test(String(saleData.tableNo).trim()) 
+        ? String(saleData.tableNo).trim().padStart(2, '0') 
+        : saleData.tableNo;
+      text += this.formatTwoCols(`<B>Bill No: ${saleData.invoiceNumber || saleData.id || saleData.orderId || ""}</B>`, `<B>TABLE: ${cleanTableNo}</B>`, effectiveWidth);
+    } else {
+      text += `[L]<B>Bill No: ${saleData.invoiceNumber || saleData.id || saleData.orderId || ""}</B>\n`;
+    }
+    text += `[L]<B>Date: ${dateFormatted}${timeFormatted}</B>\n`;
     if (saleData.waiterName && saleData.waiterName !== "Staff") {
-      text += `[L]Waiter: ${saleData.waiterName}\n`;
+      const isQuick = !!(saleData.isQuickServe || saleData.isQuick || saleData.isQuickServeMode || (typeof saleData.waiterName === "string" && saleData.waiterName.toLowerCase().includes("(quick serve)")));
+      const displayWaiter = isQuick ? (saleData.waiterName.toLowerCase().includes("(quick serve)") ? saleData.waiterName : `${saleData.waiterName} (quick serve)`) : saleData.waiterName;
+      text += `[L]<B>Waiter: ${displayWaiter}</B>\n`;
+    }
+    if (saleData.mobileNo) {
+      text += `[L]<B>Member Phone: ${saleData.mobileNo}</B>\n`;
     }
     text += lineDash;
 
     // Items Header - Adopt column layout (48 cols for 80mm, 32 cols for 58mm)
     if (effectiveWidth === 32) {
       const itemH = "ITEM".padEnd(12, " ") + "QTY".padStart(3, " ") + "PRICE".padStart(7, " ") + "TOTAL".padStart(10, " ");
-      text += `[L]${itemH}\n`;
+      text += `[L]<B>${itemH}</B>\n`;
     } else {
       const itemH = "ITEM".padEnd(24, " ") + "QTY".padStart(4, " ") + "PRICE".padStart(10, " ") + "TOTAL".padStart(10, " ");
-      text += `[L]${itemH}\n`;
+      text += `[L]<B>${itemH}</B>\n`;
     }
     text += lineDash;
 
@@ -1801,18 +1880,18 @@ class UniversalPrinter {
         const totalWidth = 10;
 
         if (fullName.length > nameWidth) {
-          text += `[L]${fullName}\n`;
+          text += `[L]<B>${fullName}</B>\n`;
           let line = "".padEnd(nameWidth, " ");
           line += qty.padStart(qtyWidth, " ");
           line += price.padStart(priceWidth, " ");
           line += total.padStart(totalWidth, " ");
-          text += `[L]${line}\n`;
+          text += `[L]<B>${line}</B>\n`;
         } else {
           let line = fullName.padEnd(nameWidth, " ");
           line += qty.padStart(qtyWidth, " ");
           line += price.padStart(priceWidth, " ");
           line += total.padStart(totalWidth, " ");
-          text += `[L]${line}\n`;
+          text += `[L]<B>${line}</B>\n`;
         }
       } else {
         // 48-column layout (80mm)
@@ -1820,15 +1899,15 @@ class UniversalPrinter {
         const qty48 = qty.padStart(4);
         const price48 = price.padStart(10);
         const total48 = total.padStart(10);
-        text += `[L]${name48}${qty48}${price48}${total48}\n`;
+        text += `[L]<B>${name48}${qty48}${price48}${total48}</B>\n`;
         if (fullName.length > 24) {
-          text += `[L]   ${fullName.substring(24)}\n`;
+          text += `[L]<B>   ${fullName.substring(24)}</B>\n`;
         }
       }
 
       const songName = item.songName || item.SongName || "";
       if (songName) {
-        text += `[L]   🎵 ${songName}\n`;
+        text += `[L]<B>   🎵 ${songName}</B>\n`;
       }
 
       // Modifiers
@@ -1838,7 +1917,27 @@ class UniversalPrinter {
           if (!mName) return;
           if (mName.toUpperCase().startsWith('INSTR:')) return;
           if (/service\s*charge/i.test(mName)) return;
-          text += `[L]        <B>+ ${mName}</B>\n`;
+          text += `[L]<B>        + ${mName}</B>\n`;
+        });
+      }
+
+      // Combo selections
+      const comboSels = item.comboSelections || 
+        (typeof item.ComboDetailsJSON === 'string' && item.ComboDetailsJSON 
+          ? (() => { try { const p = JSON.parse(item.ComboDetailsJSON); return Array.isArray(p) ? p : p.groups || p.items || []; } catch { return undefined; } })() 
+          : (Array.isArray(item.ComboDetailsJSON) ? item.ComboDetailsJSON : undefined)) || [];
+      const hasCombo = Array.isArray(comboSels) && comboSels.length > 0;
+      if (hasCombo) {
+        comboSels.forEach((group: any) => {
+          const choices = group.items || group.dishes || (Array.isArray(group) ? group : [group]);
+          if (Array.isArray(choices)) {
+            choices.forEach((opt: any) => {
+              const optName = opt.name || opt.DishName || opt.itemName || "";
+              if (optName) {
+                text += `[L]<B>        - ${optName}</B>\n`;
+              }
+            });
+          }
         });
       }
 
@@ -1853,13 +1952,13 @@ class UniversalPrinter {
           discType === "percentage"
             ? `-${discAmt}%`
             : `-${symbol}${effectiveDisc.toFixed(2)}`;
-        text += `[L]      Discount: ${discStr}\n`;
+        text += `[L]<B>      Discount: ${discStr}</B>\n`;
       }
 
       // VIP Discount
       const vipDiscAmt = Number(item.vipDiscountAmount || 0);
       if (vipDiscAmt > 0) {
-        text += `[L]      VIP Discount: -${symbol}${(vipDiscAmt).toFixed(2)}\n`;
+        text += `[L]<B>      VIP Discount: -${symbol}${(vipDiscAmt).toFixed(2)}</B>\n`;
       }
     });
 
@@ -1941,24 +2040,24 @@ class UniversalPrinter {
     const hasAnyDiscount = totalItemDiscount > 0 || orderDiscount > 0 || totalVipDiscount > 0;
     let currentSubtotal = grossTotal;
 
-    text += this.formatTwoCols("Sub Total:", `${symbol}${grossTotal.toFixed(2)}`, effectiveWidth);
+    text += this.formatTwoCols("<B>Sub Total:</B>", `<B>${symbol}${grossTotal.toFixed(2)}</B>`, effectiveWidth);
 
     if (totalItemDiscount > 0) {
-      text += this.formatTwoCols("Item Discounts:", `-${symbol}${totalItemDiscount.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols("<B>Item Discounts:</B>", `<B>-${symbol}${totalItemDiscount.toFixed(2)}</B>`, effectiveWidth);
       currentSubtotal -= totalItemDiscount;
     }
 
     if (orderDiscount > 0) {
       const discLabel =
         finalDiscountInfo?.type === "percentage"
-          ? `Discount (${finalDiscountInfo.value}%):`
-          : "Discount:";
-      text += this.formatTwoCols(discLabel, `-${symbol}${orderDiscount.toFixed(2)}`, effectiveWidth);
+          ? `<B>Discount (${finalDiscountInfo.value}%):</B>`
+          : "<B>Discount:</B>";
+      text += this.formatTwoCols(discLabel, `<B>-${symbol}${orderDiscount.toFixed(2)}</B>`, effectiveWidth);
       currentSubtotal -= orderDiscount;
     }
 
     if (totalVipDiscount > 0) {
-      text += this.formatTwoCols("VIP Discount Savings:", `-${symbol}${totalVipDiscount.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols("<B>VIP Discount Savings:</B>", `<B>-${symbol}${totalVipDiscount.toFixed(2)}</B>`, effectiveWidth);
       currentSubtotal -= totalVipDiscount;
     }
 
@@ -1966,7 +2065,7 @@ class UniversalPrinter {
 
     if (hasAnyDiscount) {
       text += lineDash;
-      text += this.formatTwoCols("Net Amount:", `${symbol}${currentSubtotal.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols("<B>Net Amount:</B>", `<B>${symbol}${currentSubtotal.toFixed(2)}</B>`, effectiveWidth);
     }
 
     let finalTotal = saleData.total || saleData.totalAmount || currentSubtotal;
@@ -2011,23 +2110,20 @@ class UniversalPrinter {
           scEligibleNet = Math.max(0, scEligibleSubtotal - proportion * orderDiscount);
         }
       }
-      serviceChargeAmount = Math.round(scEligibleNet * (scPercentage / 100) * 100) / 100;
+      serviceChargeAmount = scEligibleNet * (scPercentage / 100);
     }
-
     const hasSC = serviceChargeAmount > 0;
-    const savedTakeawayCharge = saleData.takeawayCharge != null && saleData.takeawayCharge !== "" 
-      ? parseFloat(String(saleData.takeawayCharge)) 
-      : null;
 
     let globalTakeawayQty = 0;
     let globalTakeawayCharge = 0;
     let specificTakeawayCharge = 0;
 
+    const savedTakeawayCharge = saleData.takeawayCharge != null ? parseFloat(String(saleData.takeawayCharge)) : null;
     (saleData.items || []).forEach((item: any) => {
       const isTW = item.isTakeaway || item.IsTakeaway || item.isTakeAway || item.IsTakeAway;
       const isVoided = item.status === "VOIDED" || item.StatusCode === 0;
       if (isTW && !isVoided) {
-        const qty = Number(item.qty || item.quantity || item.Qty || item.Quantity || 1);
+        const qty = Number(item.qty || item.quantity || 1);
         const hasSpecific = item.TakeawayCharge !== null && item.TakeawayCharge !== undefined && !isNaN(parseFloat(String(item.TakeawayCharge))) && parseFloat(String(item.TakeawayCharge)) > 0;
         const isSpecific = hasSpecific && parseFloat(String(item.TakeawayCharge)) !== takeawayRate;
         if (isSpecific) {
@@ -2038,79 +2134,84 @@ class UniversalPrinter {
         }
       }
     });
-
-    const itemDerivedTW = globalTakeawayCharge + specificTakeawayCharge;
-    const takeawayChargeForGST = (savedTakeawayCharge !== null && !isNaN(savedTakeawayCharge))
-      ? savedTakeawayCharge
-      : itemDerivedTW;
-
-    const taxableAmount = currentSubtotal + serviceChargeAmount + takeawayChargeForGST;
+    const takeawayCharge = savedTakeawayCharge !== null && savedTakeawayCharge !== undefined ? savedTakeawayCharge : (globalTakeawayCharge + specificTakeawayCharge);
+    
+    const taxableAmount = currentSubtotal + serviceChargeAmount + takeawayCharge;
     const gstAmountRaw = hasGST ? taxableAmount * (gstRate / 100) : 0;
     const gstAmount = Math.round(gstAmountRaw * 100) / 100;
     
-    // On checkout bills, bill total is strictly the sum of taxable amount + GST
-    if (isCheckout || finalTotal === 0) {
+    if (saleData.isCheckout || finalTotal === 0) {
       finalTotal = Math.round((taxableAmount + gstAmount) * 100) / 100;
     }
-
+    
     const storedRoundOff = saleData.roundOff !== undefined && saleData.roundOff !== null
       ? parseFloat(String(saleData.roundOff))
       : null;
-    const computedDifference = parseFloat((finalTotal - (taxableAmount + gstAmount)).toFixed(2));
+    const difference = parseFloat((finalTotal - (taxableAmount + gstAmount)).toFixed(2));
     const printedRoundOff = (storedRoundOff !== null && !isNaN(storedRoundOff) && storedRoundOff !== 0)
       ? storedRoundOff
-      : (!isCheckout && Math.abs(computedDifference) >= 0.01 ? computedDifference : 0);
+      : (!saleData.isCheckout && Math.abs(difference) >= 0.01 ? difference : 0);
 
     if (hasSC) {
-      text += this.formatTwoCols(allItemsHaveSC ? "Service Charge:" : "Item Service Charge:", `${symbol}${serviceChargeAmount.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols(allItemsHaveSC ? "<B>Service Charge:</B>" : "<B>Item Service Charge:</B>", `<B>${symbol}${serviceChargeAmount.toFixed(2)}</B>`, effectiveWidth);
     }
 
     if (globalTakeawayCharge > 0) {
-      text += this.formatTwoCols(`Takeaway Charges (${symbol}${takeawayRate.toFixed(2)}*${globalTakeawayQty}):`, `${symbol}${globalTakeawayCharge.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols(`<B>Takeaway Charges (${symbol}${takeawayRate.toFixed(2)}*${globalTakeawayQty}):</B>`, `<B>${symbol}${globalTakeawayCharge.toFixed(2)}</B>`, effectiveWidth);
     }
     if (specificTakeawayCharge > 0) {
-      text += this.formatTwoCols(`Takeaway Charges (Item-wise):`, `${symbol}${specificTakeawayCharge.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols("<B>Takeaway Charges (Item-wise):</B>", `<B>${symbol}${specificTakeawayCharge.toFixed(2)}</B>`, effectiveWidth);
     }
 
     if (hasGST && gstAmount > 0) {
-      text += this.formatTwoCols(`GST (${gstRate}%):`, `${symbol}${gstAmount.toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols(`<B>GST (${gstRate}%):</B>`, `<B>${symbol}${gstAmount.toFixed(2)}</B>`, effectiveWidth);
       text += lineDash;
     }
 
     if (printedRoundOff && printedRoundOff !== 0) {
       const roSign = printedRoundOff > 0 ? "+" : (printedRoundOff < 0 ? "-" : "");
-      text += this.formatTwoCols("Round Off:", `${roSign}${symbol}${Math.abs(printedRoundOff).toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols("<B>Round Off:</B>", `<B>${roSign}${symbol}${Math.abs(printedRoundOff).toFixed(2)}</B>`, effectiveWidth);
       text += lineDash;
     }
 
-    // Payment Details
-    if (saleData.payments && Array.isArray(saleData.payments) && saleData.payments.length > 0) {
-      text += "[L]Payment Details:\n";
-      saleData.payments.forEach((p: any) => {
-        const modeLabel = `  ${String(p.payMode || p.payModeName || p.Remarks || "Payment")}`;
-        const amountVal = `${symbol}${parseFloat(p.amount).toFixed(2)}`;
-        text += this.formatTwoCols(modeLabel, amountVal, effectiveWidth);
-      });
-      text += lineDash;
-    } else {
-      const methodLabel = `  ${String(saleData.paymentMethod || "Payment")}`;
-      const amountVal = `${symbol}${parseFloat(finalTotal).toFixed(2)}`;
-      text += this.formatTwoCols(methodLabel, amountVal, effectiveWidth);
-      text += lineDash;
+    // Payment Details (Hide on checkout bills, show on settled receipts)
+    if (!isCheckout) {
+      if (saleData.payments && Array.isArray(saleData.payments) && saleData.payments.length > 0) {
+        text += "[L]<B>Payment Details:</B>\n";
+        saleData.payments.forEach((p: any) => {
+          let modeText = String(p.payMode || p.payModeName || p.Remarks || "Payment");
+          if (modeText.toUpperCase().trim() === "FOC") modeText = "FOC (Discount)";
+          const modeLabel = `  ${modeText}`;
+          const amountVal = `${symbol}${parseFloat(p.amount).toFixed(2)}`;
+          text += this.formatTwoCols(`<B>${modeLabel}</B>`, `<B>${amountVal}</B>`, effectiveWidth);
+        });
+        text += lineDash;
+      } else {
+        let methodText = String(saleData.paymentMethod || "Payment");
+        if (methodText.toUpperCase().trim() === "FOC") methodText = "FOC (Discount)";
+        const methodLabel = `  ${methodText}`;
+        const amountVal = `${symbol}${parseFloat(finalTotal).toFixed(2)}`;
+        text += this.formatTwoCols(`<B>${methodLabel}</B>`, `<B>${amountVal}</B>`, effectiveWidth);
+        text += lineDash;
+      }
     }
 
-    text += this.formatTwoCols("TOTAL:", `${symbol}${finalTotal.toFixed(2)}`, effectiveWidth);
+    // High visibility large bold TOTAL
+    text += `[R]<font size='big'><B>TOTAL: ${symbol}${finalTotal.toFixed(2)}</B></font>\n`;
 
     // Reward points summary
     if (saleData.rewardPointsEarned && parseFloat(String(saleData.rewardPointsEarned)) > 0) {
       text += lineDash;
-      text += this.formatTwoCols("Reward Points Earned:", `+${symbol}${parseFloat(String(saleData.rewardPointsEarned)).toFixed(2)}`, effectiveWidth);
+      text += this.formatTwoCols("<B>Reward Points Earned:</B>", `<B>+${symbol}${parseFloat(String(saleData.rewardPointsEarned)).toFixed(2)}</B>`, effectiveWidth);
       if (saleData.memberRewardBalance && parseFloat(String(saleData.memberRewardBalance)) > 0) {
-        text += this.formatTwoCols("Available Member Credit:", `${symbol}${parseFloat(String(saleData.memberRewardBalance)).toFixed(2)}`, effectiveWidth);
+        text += this.formatTwoCols("<B>Available Member Credit:</B>", `<B>${symbol}${parseFloat(String(saleData.memberRewardBalance)).toFixed(2)}</B>`, effectiveWidth);
       }
     }
 
     text += lineEq;
+    if (isCheckout) {
+      text += "[C]<B>*** PLEASE PAY AT THE COUNTER ***</B>\n";
+    }
     text += "[C]<B>THANK YOU! COME AGAIN!</B>\n";
     text += "[C]SMART-CLUB BY UNIPR0SG\n\n\n\n";
 

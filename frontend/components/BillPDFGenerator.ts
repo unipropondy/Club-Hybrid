@@ -837,8 +837,8 @@ private static escapeHtml(str: string): string {
               </div>
               ${saleData.tableNo ? `
                 <div class="detail-row" style="margin-top: 1.5mm; padding-top: 1mm; border-top: 1px dashed #ccc;">
-                  <span class="detail-label" style="font-size: 14px; font-weight: 900;">TABLE NO:</span>
-                  <span class="detail-value" style="font-size: 14px; font-weight: 900;">${saleData.tableNo}</span>
+                  <span class="detail-label" style="font-size: 18px; font-weight: 900;">TABLE NO:</span>
+                  <span class="detail-value" style="font-size: 18px; font-weight: 900;">${saleData.tableNo}</span>
                 </div>
               ` : ''}
               ${saleData.waiterName && saleData.waiterName !== "Staff" ? `
