@@ -8,3 +8,4 @@ export * from './PaymodeRepository';
 export * from './MemberRepository';
 export * from './SettingsRepository';
 export * from './SyncQueueRepository';
+export * from './UserRepository';

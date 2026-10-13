@@ -1286,6 +1286,15 @@ export default function SalesReport() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
     setRefreshing(true);
+    try {
+      const syncCtrl = new AbortController();
+      const syncTimeout = setTimeout(() => syncCtrl.abort(), 4000);
+      await fetch(`${API_URL}/api/sync/pull-sales`, {
+        method: "POST",
+        signal: syncCtrl.signal,
+      });
+      clearTimeout(syncTimeout);
+    } catch (_) {}
     await fetchData();
     if (detailReportType) {
       await fetchDetailReport(detailReportType);

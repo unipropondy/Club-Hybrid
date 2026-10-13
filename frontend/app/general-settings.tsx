@@ -157,9 +157,11 @@ export default function GeneralSettingsScreen() {
       const res = await fetch(`${API_URL}/api/sync/pull-now`, { method: "POST" });
       const data = await res.json();
       if (data.success) {
+        const dishText = `${data.dishCount || 0} menu items`;
+        const salesText = data.pulledSalesCount ? ` & ${data.pulledSalesCount} sales` : "";
         showToast({
           type: "success",
-          message: `Pulled ${data.dishCount || 0} menu items from Cloud ERP.`,
+          message: `Pulled ${dishText}${salesText} from Cloud ERP.`,
         });
       } else {
         showToast({

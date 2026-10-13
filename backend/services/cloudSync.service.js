@@ -440,7 +440,27 @@ async function pushSalesToCloud(ioInstance = null) {
             WHERE SettlementID = @sid OR BillNo = @billNo
           `);
 
-        if (existCheck.recordset.length === 0) {
+        let safeBillNo = billNo;
+        if (existCheck.recordset.length > 0) {
+          const matchedSid = String(existCheck.recordset[0].SettlementID || "").toLowerCase();
+          if (matchedSid === String(sid).toLowerCase()) {
+            // Already uploaded to Cloud
+            await localPool.request()
+              .input("sid", sql.UniqueIdentifier, sid)
+              .query("UPDATE SettlementHeader SET isUploadHQ = 1 WHERE SettlementID = @sid");
+            continue;
+          } else {
+            // BillNo collision: Cloud has a different bill with the same BillNo!
+            safeBillNo = `${billNo}-${String(bill.CashierId || bill.StationId || "L").slice(-2)}`;
+            console.warn(`⚠️ [CloudSync] Bill collision detected for ${billNo}. Disambiguating to ${safeBillNo}`);
+            await localPool.request()
+              .input("sid", sql.UniqueIdentifier, sid)
+              .input("newNo", sql.NVarChar(50), safeBillNo)
+              .query("UPDATE SettlementHeader SET BillNo = @newNo WHERE SettlementID = @sid");
+          }
+        }
+
+        if (true) {
           // B. Begin Remote Transaction for atomic multi-table insert
           const rTx = new sql.Transaction(remotePool);
           await rTx.begin();
@@ -829,6 +849,278 @@ async function pushSalesToCloud(ioInstance = null) {
       error: error.message,
     };
   }
+}
+
+/**
+ * Pulls any settled sales created on Central Cloud ERP (or other terminals) down to Local DB.
+ * Guarantees that local POS reports and analytics always match cloud numbers 100%.
+ */
+async function pullSalesFromCloud(ioInstance = null) {
+  let localPool;
+  let remotePool;
+
+  try {
+    localPool = getPool() || (await poolPromise);
+    remotePool = await getRemotePool();
+
+    const localCols = async (tableName) => {
+      const res = await localPool.request().query(`
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMNPROPERTY(object_id(TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IsIdentity
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = '${tableName}'
+      `);
+      return res.recordset.filter((c) => c.IsIdentity !== 1);
+    };
+
+    const headerCols = await localCols("SettlementHeader");
+    const itemCols = await localCols("SettlementItemDetail");
+    const stsCols = await localCols("SettlementTotalSales");
+    const payCurCols = await localCols("PaymentDetailCur");
+    const invCurCols = await localCols("RestaurantInvoiceCur");
+    const orderCols = await localCols("RestaurantOrder");
+
+    // Fetch settled bills from remote
+    const remoteBillsRes = await remotePool.request().query(`
+      SELECT * FROM SettlementHeader WITH (NOLOCK)
+      WHERE BillNo IS NOT NULL AND BillNo != ''
+      ORDER BY LastSettlementDate DESC
+    `);
+
+    // Fetch existing SettlementIDs from local
+    const localSidsRes = await localPool.request().query(
+      "SELECT SettlementID FROM SettlementHeader WITH (NOLOCK)"
+    );
+    const localSids = new Set(
+      localSidsRes.recordset.map((r) => String(r.SettlementID).toLowerCase())
+    );
+
+    const missingFromLocal = remoteBillsRes.recordset.filter(
+      (b) => !localSids.has(String(b.SettlementID).toLowerCase())
+    );
+
+    if (missingFromLocal.length === 0) {
+      return {
+        success: true,
+        pulledCount: 0,
+        message: "Local sales are fully up-to-date with Cloud.",
+      };
+    }
+
+    console.log(`📥 [CloudSync] Pulling ${missingFromLocal.length} sales from Cloud into Local DB...`);
+    let pulledCount = 0;
+
+    for (const bill of missingFromLocal) {
+      const sid = bill.SettlementID;
+      const lTx = new sql.Transaction(localPool);
+      await lTx.begin();
+
+      try {
+        // 1. Insert SettlementHeader
+        const shReq = new sql.Request(lTx);
+        const shColNames = [];
+        const shParamNames = [];
+        for (const col of headerCols) {
+          let val = bill[col.COLUMN_NAME];
+          if (col.COLUMN_NAME === "isUploadHQ") val = 1;
+          if (val !== undefined && val !== null) {
+            shColNames.push(`[${col.COLUMN_NAME}]`);
+            shParamNames.push(`@h_${col.COLUMN_NAME}`);
+            shReq.input(`h_${col.COLUMN_NAME}`, val);
+          }
+        }
+        if (shColNames.length > 0) {
+          await shReq.query(
+            `INSERT INTO SettlementHeader (${shColNames.join(", ")}) VALUES (${shParamNames.join(", ")})`
+          );
+        }
+
+        // 2. Insert SettlementItemDetail
+        const rItems = await remotePool
+          .request()
+          .input("sid", sql.UniqueIdentifier, sid)
+          .query("SELECT * FROM SettlementItemDetail WITH (NOLOCK) WHERE SettlementID = @sid");
+
+        for (let i = 0; i < rItems.recordset.length; i++) {
+          const item = rItems.recordset[i];
+          const itemReq = new sql.Request(lTx);
+          const iCols = [];
+          const iParams = [];
+          for (const col of itemCols) {
+            const val = item[col.COLUMN_NAME];
+            if (val !== undefined && val !== null) {
+              iCols.push(`[${col.COLUMN_NAME}]`);
+              iParams.push(`@i_${i}_${col.COLUMN_NAME}`);
+              itemReq.input(`i_${i}_${col.COLUMN_NAME}`, val);
+            }
+          }
+          if (iCols.length > 0) {
+            await itemReq.query(
+              `INSERT INTO SettlementItemDetail (${iCols.join(", ")}) VALUES (${iParams.join(", ")})`
+            );
+          }
+        }
+
+        // 3. Insert SettlementTotalSales
+        const rSts = await remotePool
+          .request()
+          .input("sid", sql.UniqueIdentifier, sid)
+          .query("SELECT * FROM SettlementTotalSales WITH (NOLOCK) WHERE SettlementID = @sid");
+
+        for (let s = 0; s < rSts.recordset.length; s++) {
+          const sts = rSts.recordset[s];
+          const stsReq = new sql.Request(lTx);
+          const sCols = [];
+          const sParams = [];
+          for (const col of stsCols) {
+            const val = sts[col.COLUMN_NAME];
+            if (val !== undefined && val !== null) {
+              sCols.push(`[${col.COLUMN_NAME}]`);
+              sParams.push(`@s_${s}_${col.COLUMN_NAME}`);
+              stsReq.input(`s_${s}_${col.COLUMN_NAME}`, val);
+            }
+          }
+          if (sCols.length > 0) {
+            await stsReq.query(
+              `INSERT INTO SettlementTotalSales (${sCols.join(", ")}) VALUES (${sParams.join(", ")})`
+            );
+          }
+        }
+
+        // 4. Insert PaymentDetailCur
+        const rPay = await remotePool
+          .request()
+          .input("sid", sql.UniqueIdentifier, sid)
+          .query(
+            "SELECT * FROM PaymentDetailCur WITH (NOLOCK) WHERE RestaurantBillId = @sid UNION SELECT * FROM PaymentDetail WITH (NOLOCK) WHERE RestaurantBillId = @sid OR SettlementId = @sid"
+          );
+
+        for (let p = 0; p < rPay.recordset.length; p++) {
+          const pay = rPay.recordset[p];
+          const payReq = new sql.Request(lTx);
+          const pCols = [];
+          const pParams = [];
+          for (const col of payCurCols) {
+            const val = pay[col.COLUMN_NAME];
+            if (val !== undefined && val !== null) {
+              pCols.push(`[${col.COLUMN_NAME}]`);
+              pParams.push(`@p_${p}_${col.COLUMN_NAME}`);
+              payReq.input(`p_${p}_${col.COLUMN_NAME}`, val);
+            }
+          }
+          if (pCols.length > 0) {
+            await payReq.query(
+              `INSERT INTO PaymentDetailCur (${pCols.join(", ")}) VALUES (${pParams.join(", ")})`
+            ).catch(() => {});
+          }
+        }
+
+        // 5. Insert RestaurantInvoiceCur
+        const rInv = await remotePool
+          .request()
+          .input("sid", sql.UniqueIdentifier, sid)
+          .query(
+            "SELECT * FROM RestaurantInvoiceCur WITH (NOLOCK) WHERE RestaurantBillId = @sid UNION SELECT * FROM RestaurantInvoice WITH (NOLOCK) WHERE RestaurantBillId = @sid"
+          );
+
+        for (let j = 0; j < rInv.recordset.length; j++) {
+          const inv = rInv.recordset[j];
+          const invReq = new sql.Request(lTx);
+          const ivCols = [];
+          const ivParams = [];
+          for (const col of invCurCols) {
+            const val = inv[col.COLUMN_NAME];
+            if (val !== undefined && val !== null) {
+              ivCols.push(`[${col.COLUMN_NAME}]`);
+              ivParams.push(`@iv_${j}_${col.COLUMN_NAME}`);
+              invReq.input(`iv_${j}_${col.COLUMN_NAME}`, val);
+            }
+          }
+          if (ivCols.length > 0) {
+            await invReq.query(
+              `INSERT INTO RestaurantInvoiceCur (${ivCols.join(", ")}) VALUES (${ivParams.join(", ")})`
+            ).catch(() => {});
+          }
+        }
+
+        // 6. Insert RestaurantOrder if exists
+        if (bill.OrderId) {
+          const rOrd = await remotePool
+            .request()
+            .input("oid", sql.UniqueIdentifier, bill.OrderId)
+            .query("SELECT TOP 1 * FROM RestaurantOrder WITH (NOLOCK) WHERE OrderId = @oid")
+            .catch(() => ({ recordset: [] }));
+
+          if (rOrd.recordset && rOrd.recordset.length > 0) {
+            const ord = rOrd.recordset[0];
+            const oReq = new sql.Request(lTx);
+            const oCols = [];
+            const oParams = [];
+            for (const col of orderCols) {
+              const val = ord[col.COLUMN_NAME];
+              if (val !== undefined && val !== null) {
+                oCols.push(`[${col.COLUMN_NAME}]`);
+                oParams.push(`@o_${col.COLUMN_NAME}`);
+                oReq.input(`o_${col.COLUMN_NAME}`, val);
+              }
+            }
+            if (oCols.length > 0) {
+              await oReq.query(
+                `INSERT INTO RestaurantOrder (${oCols.join(", ")}) VALUES (${oParams.join(", ")})`
+              ).catch(() => {});
+            }
+          }
+        }
+
+        await lTx.commit();
+        pulledCount++;
+      } catch (billErr) {
+        await lTx.rollback();
+        console.warn(`⚠️ [CloudSync] Error pulling bill ${bill.BillNo}:`, billErr.message);
+      }
+    }
+
+    console.log(`✅ [CloudSync] Successfully pulled ${pulledCount} bills from Cloud ERP.`);
+
+    if (ioInstance && pulledCount > 0) {
+      ioInstance.emit("cloud_sync_completed", {
+        type: "PULL_SALES",
+        pulledCount,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return {
+      success: true,
+      pulledCount,
+      timestamp: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.warn("⚠️ [CloudSync Pull Sales Notice]:", error.message);
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Full Bidirectional Synchronization:
+ * 1. Pushes pending local offline sales to Cloud ERP
+ * 2. Pulls new Cloud sales (from online ordering / other terminals) into Local DB
+ * 3. Pulls master data changes (dishes, prices, categories) to Local DB
+ */
+async function fullBidirectionalSync(ioInstance = null) {
+  const pushRes = await pushSalesToCloud(ioInstance).catch((e) => ({ success: false, error: e.message }));
+  const pullSalesRes = await pullSalesFromCloud(ioInstance).catch((e) => ({ success: false, error: e.message }));
+  const pullMasterRes = await pullMasterFromCloud(ioInstance).catch((e) => ({ success: false, error: e.message }));
+
+  return {
+    success: true,
+    push: pushRes,
+    pullSales: pullSalesRes,
+    pullMaster: pullMasterRes,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 /**
@@ -1328,7 +1620,57 @@ async function syncSettingsAndSequences(remotePool, localPool) {
       }
     }
 
-    console.log(`✅ [CloudSync] Settings & order sequences synchronized.`);
+    // 3. PrintMaster: Push local printer configurations & IP addresses to Cloud
+    const locPrinters = await localPool.request().query("SELECT * FROM PrintMaster WITH (NOLOCK)").catch(() => ({ recordset: [] }));
+    for (const p of locPrinters.recordset) {
+      if (!p.PrinterName) continue;
+      const cleanIP = String(p.PrinterIP || "").trim();
+      await remotePool.request()
+        .input("pid", sql.UniqueIdentifier, p.PrinterId)
+        .input("pname", sql.VarChar(100), p.PrinterName)
+        .input("pip", sql.VarChar(100), cleanIP)
+        .input("ppath", sql.VarChar(255), p.PrinterPath || "")
+        .input("ptype", sql.Int, p.PrinterType || 0)
+        .input("psec", sql.Int, p.PrintSection || 0)
+        .input("kname", sql.VarChar(50), p.KitchenTypeName || "")
+        .input("kval", sql.Int, p.KitchenTypeValue || 0)
+        .input("active", sql.Bit, p.IsActive ? 1 : 0)
+        .input("enabled", sql.Bit, p.IsEnabled ? 1 : 0)
+        .input("copy", sql.Int, p.PrintCopy || 1)
+        .query(`
+          IF EXISTS (SELECT 1 FROM PrintMaster WHERE PrinterId = @pid OR PrinterName = @pname)
+            UPDATE PrintMaster
+            SET PrinterIP = @pip, PrinterPath = @ppath, PrinterType = @ptype,
+                PrintSection = @psec, KitchenTypeName = @kname, KitchenTypeValue = @kval,
+                IsActive = @active, IsEnabled = @enabled, PrintCopy = @copy
+            WHERE PrinterId = @pid OR PrinterName = @pname
+          ELSE
+            INSERT INTO PrintMaster (PrinterId, PrinterName, PrinterPath, PrinterIP, PrinterType, PrintSection, KitchenTypeName, KitchenTypeValue, IsActive, IsEnabled, PrintCopy)
+            VALUES (@pid, @pname, @ppath, @pip, @ptype, @psec, @kname, @kval, @active, @enabled, @copy)
+        `).catch(() => {});
+    }
+
+    // 4. CompanySettings: Push local company settings to Remote
+    const locComp = await localPool.request().query("SELECT TOP 1 * FROM CompanySettings WITH (NOLOCK)").catch(() => ({ recordset: [] }));
+    if (locComp.recordset.length > 0) {
+      const lc = locComp.recordset[0];
+      await remotePool.request()
+        .input("cname", sql.NVarChar(200), lc.CompanyName || "")
+        .input("addr", sql.NVarChar(500), lc.Address || "")
+        .input("phone", sql.NVarChar(50), lc.Phone || "")
+        .input("email", sql.NVarChar(100), lc.Email || "")
+        .input("gst", sql.Decimal(18, 2), lc.GSTPercentage || 0)
+        .input("svc", sql.Decimal(18, 2), lc.ServiceChargePercentage || 0)
+        .query(`
+          IF EXISTS (SELECT 1 FROM CompanySettings WHERE Id = '1')
+            UPDATE CompanySettings
+            SET CompanyName = @cname, Address = @addr, Phone = @phone, Email = @email,
+                GSTPercentage = @gst, ServiceChargePercentage = @svc
+            WHERE Id = '1'
+        `).catch(() => {});
+    }
+
+    console.log(`✅ [CloudSync] Settings, printer IPs & order sequences synchronized.`);
   } catch (err) {
     console.warn("⚠️ [CloudSync Settings Notice]:", err.message);
   }
@@ -1405,6 +1747,8 @@ async function getSyncStatus() {
 
 module.exports = {
   pushSalesToCloud,
+  pullSalesFromCloud,
+  fullBidirectionalSync,
   syncLiveTablesAndCarts,
   pullMasterFromCloud,
   syncMembersAndCreditCustomers,

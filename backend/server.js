@@ -539,23 +539,42 @@ httpServer.listen(PORT, async () => {
   }, 3 * 60 * 1000); // Every 3 minutes
   console.log("🍳 [KitchenSync] Background auto-sync started (every 3 minutes).");
 
-  // ☁️ HYBRID CLOUD SYNC: Automatic periodic background push & master pull
-  const { pushSalesToCloud } = require("./services/cloudSync.service");
-  const runCloudSyncCycle = async () => {
+  // ☁️ HYBRID CLOUD SYNC: Dynamic periodic background 2-way sync (push sales + pull online sales + pull catalog)
+  const { fullBidirectionalSync } = require("./services/cloudSync.service");
+  let cloudSyncTimeout = null;
+
+  const scheduleNextCloudSync = async () => {
+    let intervalMinutes = 15;
     try {
-      await pushSalesToCloud(io);
-    } catch (pushErr) {
-      // Gracefully ignore network errors so offline POS billing is NEVER affected
-    }
+      const pool = getPool() || (await poolPromise);
+      if (pool) {
+        const appSet = await pool.request().query("SELECT TOP 1 CloudSyncIntervalMinutes FROM AppSettings WITH (NOLOCK)").catch(() => ({ recordset: [] }));
+        if (appSet.recordset && appSet.recordset.length > 0 && appSet.recordset[0].CloudSyncIntervalMinutes) {
+          const val = parseInt(appSet.recordset[0].CloudSyncIntervalMinutes);
+          if (val >= 1 && val <= 1440) intervalMinutes = val;
+        }
+      }
+    } catch (_) {}
+
+    const intervalMs = intervalMinutes * 60 * 1000;
+    cloudSyncTimeout = setTimeout(async () => {
+      try {
+        await fullBidirectionalSync(io);
+      } catch (syncErr) {
+        // Gracefully ignore network errors so offline POS billing is NEVER affected
+      }
+      scheduleNextCloudSync();
+    }, intervalMs);
   };
 
-  // Run initial push 15 seconds after startup
-  setTimeout(runCloudSyncCycle, 15000);
-
-  // Periodic interval (every 15 minutes)
-  const CLOUD_SYNC_INTERVAL_MS = 15 * 60 * 1000;
-  setInterval(runCloudSyncCycle, CLOUD_SYNC_INTERVAL_MS);
-  console.log("☁️ [CloudSync] Background hybrid cloud sync started (every 15 minutes).");
+  // Run initial bidirectional sync 15 seconds after startup, then dynamic interval kicks in
+  setTimeout(async () => {
+    try {
+      await fullBidirectionalSync(io);
+    } catch (_) {}
+    scheduleNextCloudSync();
+  }, 15000);
+  console.log("☁️ [CloudSync] Background 2-way dynamic cloud sync active (respects General Settings interval).");
 });
 
 

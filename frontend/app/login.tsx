@@ -27,6 +27,7 @@ import { Theme } from "@/constants/theme";
 import { API_URL, getApiUrl, setApiUrl, localIP, onApiUrlChange } from "@/constants/Config";
 import { useAuthStore } from "@/stores/authStore";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { UserRepository } from "@/db";
 
 /* ─────────────────────────────────────────────────────────────────────────────
    CSS SILK BLOB — organic morphing blob made with border-radius + gradient
@@ -418,15 +419,40 @@ export default function LoginScreen() {
     setLoading(true);
     setError("");
     const activeApi = getApiUrl();
+    const abortCtrl = new AbortController();
+    const timeoutId = setTimeout(() => abortCtrl.abort(), 3500); // 3.5s timeout for fast offline fallback
+
     try {
       const response = await fetch(`${activeApi}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userName: userName.trim(), password }),
+        signal: abortCtrl.signal,
       });
+      clearTimeout(timeoutId);
+
       const data = await response.json();
       if (data.success && data.user) {
         setUser(data.user, data.token);
+
+        // Cache authenticated user and password locally for 100% offline tablet usage
+        try {
+          await UserRepository.saveUsers([{
+            userId: data.user.userId || data.user.id,
+            user_id: data.user.userId || data.user.id,
+            userCode: data.user.userCode,
+            userName: data.user.userName || userName.trim(),
+            userPassword: password,
+            fullName: data.user.fullName,
+            role: data.user.role,
+            roleName: data.user.roleName,
+            userGroupId: data.user.userGroupId,
+            isDisabled: false,
+          }]);
+        } catch (e) {
+          console.warn("[Login] Cache user offline notice:", e);
+        }
+
         try {
           if (rememberMe) {
             await AsyncStorage.setItem("remembered_creds", JSON.stringify({ u: userName.trim(), p: password }));
@@ -434,15 +460,28 @@ export default function LoginScreen() {
             await AsyncStorage.removeItem("remembered_creds");
           }
         } catch (e) {}
+
         try {
           const permRes = await fetch(`${activeApi}/api/auth/permissions/${data.user.role}`);
           if (permRes.ok) {
             const permData = await permRes.json();
             setPermissions(permData);
+            // Cache permissions locally
+            const permList = Object.entries(permData).map(([formCode, p]: [string, any]) => ({
+              role: data.user.role,
+              form_code: formCode,
+              can_add: p.canAdd ? 1 : 0,
+              can_update: p.canUpdate ? 1 : 0,
+              can_delete: p.canDelete ? 1 : 0,
+              can_read: p.canRead ? 1 : 0,
+            }));
+            await UserRepository.savePermissions(permList);
           }
         } catch {
-          setPermissions({});
+          const offlinePerms = await UserRepository.getPermissionsByRole(data.user.role);
+          setPermissions(offlinePerms || {});
         }
+
         const role = data.user.role;
         if (data.user.userGroupId === "DFCF23EE-F6F4-4885-8D26-0056C657595F") {
           router.replace("/sales-report");
@@ -451,13 +490,57 @@ export default function LoginScreen() {
         } else {
           router.replace("/(tabs)/category");
         }
+        return;
       } else {
+        // If server responded with error (e.g. 401), also check offline SQLite cache
+        const offlineResult = await UserRepository.authenticateOffline(userName.trim(), password);
+        if (offlineResult.success && offlineResult.user) {
+          setUser(offlineResult.user, offlineResult.token);
+          setPermissions(offlineResult.permissions || {});
+          const role = offlineResult.user.role;
+          if (offlineResult.user.userGroupId === "DFCF23EE-F6F4-4885-8D26-0056C657595F") {
+            router.replace("/sales-report");
+          } else if (role === "KDS") {
+            router.replace("/(tabs)/kds" as any);
+          } else {
+            router.replace("/(tabs)/category");
+          }
+          return;
+        }
+
         setError(data.message || "Login failed. Please try again.");
         shakeError();
       }
     } catch (err: any) {
-      setError("Cannot connect to Counter server. Check Wi-Fi & IP.");
-      shakeError();
+      clearTimeout(timeoutId);
+      console.log("[Login] Server unreachable, trying offline SQLite cache fallback...");
+
+      // ── 100% OFFLINE SQLITE LOGIN FALLBACK ──
+      const offlineResult = await UserRepository.authenticateOffline(userName.trim(), password);
+      if (offlineResult.success && offlineResult.user) {
+        setUser(offlineResult.user, offlineResult.token);
+        setPermissions(offlineResult.permissions || {});
+
+        try {
+          if (rememberMe) {
+            await AsyncStorage.setItem("remembered_creds", JSON.stringify({ u: userName.trim(), p: password }));
+          } else {
+            await AsyncStorage.removeItem("remembered_creds");
+          }
+        } catch (e) {}
+
+        const role = offlineResult.user.role;
+        if (offlineResult.user.userGroupId === "DFCF23EE-F6F4-4885-8D26-0056C657595F") {
+          router.replace("/sales-report");
+        } else if (role === "KDS") {
+          router.replace("/(tabs)/kds" as any);
+        } else {
+          router.replace("/(tabs)/category");
+        }
+      } else {
+        setError(offlineResult.message || "Cannot connect to Counter server. Check Wi-Fi & IP.");
+        shakeError();
+      }
     } finally {
       setLoading(false);
     }

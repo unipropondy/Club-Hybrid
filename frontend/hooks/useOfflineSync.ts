@@ -7,9 +7,11 @@ import {
   MemberRepository,
   SettingsRepository,
   SyncQueueRepository,
+  UserRepository,
 } from '../db';
 import { useOfflineSyncStore } from '../stores/offlineSyncStore';
 import axios from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // 20 Minutes Background Sync Interval
 const SYNC_INTERVAL_MS = 20 * 60 * 1000;
@@ -121,6 +123,29 @@ export function useOfflineSync(backendUrl: string) {
         if (response.data.general_settings) {
           await SettingsRepository.saveGeneralSettings(response.data.general_settings);
           console.log(`[OfflineSync] Pull successful! Cached general settings locally.`);
+        }
+        // 8. Save Users (for 100% offline APK counter login)
+        if (Array.isArray(response.data.users) && response.data.users.length > 0) {
+          await UserRepository.saveUsers(response.data.users);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.users.length} users locally.`);
+        }
+        // 9. Save User Permissions
+        if (Array.isArray(response.data.permissions) && response.data.permissions.length > 0) {
+          await UserRepository.savePermissions(response.data.permissions);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.permissions.length} permissions locally.`);
+        }
+        // 10. Save Active Business Day (StartDate)
+        if (response.data.active_business_day?.startDate) {
+          const sDate = response.data.active_business_day.startDate;
+          await SettingsRepository.saveActiveBusinessDay(sDate, true, response.data.active_business_day.username);
+          await AsyncStorage.setItem('selected_business_date', sDate);
+          console.log(`[OfflineSync] Pull successful! Cached active business day (${sDate}) locally.`);
+        }
+        // 11. Save License Information
+        if (response.data.license) {
+          await SettingsRepository.saveLicenseInfo(response.data.license);
+          await AsyncStorage.setItem('cached_license_info', JSON.stringify(response.data.license));
+          console.log(`[OfflineSync] Pull successful! Cached license information locally.`);
         }
       }
     } catch (err: any) {

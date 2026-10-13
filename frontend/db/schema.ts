@@ -209,4 +209,50 @@ CREATE TABLE IF NOT EXISTS general_settings_cache (
   setting_value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users_cache (
+  user_id TEXT PRIMARY KEY NOT NULL,
+  user_code TEXT,
+  user_name TEXT NOT NULL,
+  user_password TEXT NOT NULL,
+  full_name TEXT,
+  role TEXT NOT NULL DEFAULT 'CASHIER',
+  role_name TEXT,
+  user_group_id TEXT,
+  is_disabled INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users_cache(user_name);
+
+CREATE TABLE IF NOT EXISTS user_permissions_cache (
+  id TEXT PRIMARY KEY NOT NULL,
+  form_code TEXT NOT NULL,
+  role TEXT NOT NULL,
+  user_group_id TEXT,
+  can_add INTEGER NOT NULL DEFAULT 1,
+  can_update INTEGER NOT NULL DEFAULT 1,
+  can_delete INTEGER NOT NULL DEFAULT 1,
+  can_read INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS business_day_cache (
+  id TEXT PRIMARY KEY NOT NULL DEFAULT '1',
+  start_date TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  started_by TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS license_cache (
+  id TEXT PRIMARY KEY NOT NULL DEFAULT '1',
+  company_name TEXT,
+  address TEXT,
+  company_logo_url TEXT,
+  from_date TEXT,
+  to_date TEXT,
+  raw_json TEXT,
+  updated_at TEXT NOT NULL
+);
 `;

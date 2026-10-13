@@ -60,6 +60,7 @@ import {
   TableStatusType,
   useTableStatusStore,
 } from "../../stores/tableStatusStore";
+import { SettingsRepository } from "@/db";
 
 // --- MOBILE SOLID COLORS ---
 const SOLID_LIGHT_GREEN = "#F0FDF4";
@@ -565,13 +566,51 @@ export default function Category() {
         setActiveBusinessDay(data.startDate);
         setSelectedBusinessDate(data.startDate);
         await AsyncStorage.setItem("selected_business_date", data.startDate);
-      } else {
+        await SettingsRepository.saveActiveBusinessDay(data.startDate, true);
+        return;
+      } else if (data.success && !data.active) {
         setIsDayStarted(false);
         setActiveBusinessDay(null);
         setSelectedBusinessDate(null);
+        await SettingsRepository.saveActiveBusinessDay("", false);
+        return;
       }
     } catch (err) {
-      console.error("Failed to check active business day:", err);
+      console.warn("Failed to check active business day online, checking local SQLite cache...", err);
+    }
+
+    // ── 100% OFFLINE SQLITE & ASYNCSTORAGE FALLBACK ──
+    try {
+      const cachedDay = await SettingsRepository.getActiveBusinessDay();
+      if (cachedDay && cachedDay.isActive && cachedDay.startDate) {
+        setIsDayStarted(true);
+        setActiveBusinessDay(cachedDay.startDate);
+        setSelectedBusinessDate(cachedDay.startDate);
+        await AsyncStorage.setItem("selected_business_date", cachedDay.startDate);
+        return;
+      }
+
+      const savedDate = await AsyncStorage.getItem("selected_business_date");
+      if (savedDate) {
+        setIsDayStarted(true);
+        setActiveBusinessDay(savedDate);
+        setSelectedBusinessDate(savedDate);
+        await SettingsRepository.saveActiveBusinessDay(savedDate, true);
+        return;
+      }
+
+      // If offline and no start day was ever recorded, default to local date so tables are never blocked
+      const localToday = getSingaporeDateString();
+      setIsDayStarted(true);
+      setActiveBusinessDay(localToday);
+      setSelectedBusinessDate(localToday);
+      await SettingsRepository.saveActiveBusinessDay(localToday, true);
+    } catch (offlineErr) {
+      console.error("Offline business day fallback error:", offlineErr);
+      const localToday = getSingaporeDateString();
+      setIsDayStarted(true);
+      setActiveBusinessDay(localToday);
+      setSelectedBusinessDate(localToday);
     }
   };
 
@@ -590,10 +629,12 @@ export default function Category() {
     }
 
     setIsStartingDay(true);
+    const activeUsername = user?.userName || user?.username || "admin";
+
     try {
       const res = await API.post("/settlement/day-start", {
         startDate: selectedBusinessDate,
-        username: user?.userName || user?.username || "admin",
+        username: activeUsername,
       });
       const data = res.data;
       if (data.success) {
@@ -601,6 +642,7 @@ export default function Category() {
           "selected_business_date",
           selectedBusinessDate,
         );
+        await SettingsRepository.saveActiveBusinessDay(selectedBusinessDate, true, activeUsername);
         setIsDayStarted(true);
         setActiveBusinessDay(selectedBusinessDate);
         showToast({
@@ -616,12 +658,25 @@ export default function Category() {
         });
       }
     } catch (err: any) {
-      console.error("Failed to start day:", err);
-      showToast({
-        type: "error",
-        message: "Day Start Failed",
-        subtitle: err.response?.data?.error || err.message || "Failed to connect to the server.",
-      });
+      console.warn("Failed to start day online, activating offline business day locally:", err);
+      // Offline fallback: start day locally in SQLite & AsyncStorage
+      try {
+        await AsyncStorage.setItem("selected_business_date", selectedBusinessDate);
+        await SettingsRepository.saveActiveBusinessDay(selectedBusinessDate, true, activeUsername);
+        setIsDayStarted(true);
+        setActiveBusinessDay(selectedBusinessDate);
+        showToast({
+          type: "success",
+          message: "Day Started (Offline)",
+          subtitle: `Business day started locally for ${formatDateToDMY(selectedBusinessDate)}.`,
+        });
+      } catch (saveErr) {
+        showToast({
+          type: "error",
+          message: "Day Start Failed",
+          subtitle: "Failed to persist offline business date.",
+        });
+      }
     } finally {
       setIsStartingDay(false);
     }
@@ -964,6 +1019,11 @@ export default function Category() {
     (s: any) => s.canAccessReceiptSettings,
   );
   const isWaiter = useAuthStore((s: any) => s.isWaiter);
+  const isWaiterUser = Boolean(
+    user?.role === "WAITER" ||
+    user?.roleName?.toUpperCase() === "WAITER" ||
+    (typeof isWaiter === "function" && isWaiter())
+  );
   const enableKDS = useGeneralSettingsStore((s: any) => s.settings.enableKDS);
   const enableGuestDetailsPopup = useGeneralSettingsStore((s: any) =>
     s.settings.enableGuestDetailsPopup !== undefined
@@ -983,15 +1043,44 @@ export default function Category() {
   } | null>(null);
 
   const fetchLicenseInfo = async () => {
-    if (!user?.userId) return;
+    if (!user?.userId || isWaiterUser) return;
     try {
       const res = await fetch(`${API_URL}/api/auth/license/${user.userId}`);
       const data = await res.json();
       if (data.success && data.license) {
         setLicenseInfo(data.license);
+        await SettingsRepository.saveLicenseInfo(data.license);
+        await AsyncStorage.setItem("cached_license_info", JSON.stringify(data.license));
+        return;
       }
     } catch (err) {
-      console.warn("Failed to fetch license info:", err);
+      console.warn("Failed to fetch license info online, loading from local SQLite cache:", err);
+    }
+
+    // ── 100% OFFLINE SQLITE & ASYNCSTORAGE FALLBACK FOR LICENSE CARD ──
+    try {
+      const cachedLic = await SettingsRepository.getLicenseInfo();
+      if (cachedLic && (cachedLic.CompanyName || cachedLic.FromDate || cachedLic.ToDate)) {
+        setLicenseInfo(cachedLic);
+        return;
+      }
+      const savedLic = await AsyncStorage.getItem("cached_license_info");
+      if (savedLic) {
+        setLicenseInfo(JSON.parse(savedLic));
+        return;
+      }
+      const companySettings = await SettingsRepository.getCompanySettings();
+      if (companySettings) {
+        setLicenseInfo({
+          CompanyName: companySettings.CompanyName || companySettings.company_name || "Smart POS",
+          Address: companySettings.Address || companySettings.address || "",
+          CompanyLogoUrl: companySettings.CompanyLogoUrl || companySettings.company_logo_url || "",
+          FromDate: null,
+          ToDate: null,
+        });
+      }
+    } catch (licErr) {
+      console.warn("Failed to load offline license info:", licErr);
     }
   };
 
@@ -3665,203 +3754,197 @@ export default function Category() {
               )}
 
               {/* 7. SETTINGS ACCORDION */}
-              {user?.role !== "WAITER" && (
-                <>
-                  {(canAccessStoreSettings() || canAccessReceiptSettings()) && (
-                    <>
-                      <TouchableOpacity
-                        style={styles.menuItem}
-                        onPress={() => setIsSettingsExpanded(!isSettingsExpanded)}
+              <TouchableOpacity
+                style={styles.menuItem}
+                onPress={() => setIsSettingsExpanded(!isSettingsExpanded)}
+              >
+                <View
+                  style={[
+                    styles.menuIconContainer,
+                    { backgroundColor: Theme.textSecondary + "10" },
+                  ]}
+                >
+                  <Ionicons
+                    name="settings-outline"
+                    size={18}
+                    color={Theme.textSecondary}
+                  />
+                </View>
+                <Text style={[styles.menuItemText, { flex: 1 }]}>
+                  Settings
+                </Text>
+                <Ionicons
+                  name={
+                    isSettingsExpanded ? "chevron-down" : "chevron-forward"
+                  }
+                  size={16}
+                  color={Theme.textSecondary}
+                />
+              </TouchableOpacity>
+
+              {isSettingsExpanded && (
+                <View style={styles.subMenuContainer}>
+                  {!isWaiterUser && canAccessStoreSettings() && (
+                    <TouchableOpacity
+                      style={styles.subMenuItem}
+                      onPress={() => {
+                        setIsMenuVisible(false);
+                        setIsSettingsVisible(true);
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.menuIconContainer,
+                          { backgroundColor: Theme.textSecondary + "10" },
+                        ]}
                       >
-                        <View
-                          style={[
-                            styles.menuIconContainer,
-                            { backgroundColor: Theme.textSecondary + "10" },
-                          ]}
-                        >
-                          <Ionicons
-                            name="settings-outline"
-                            size={18}
-                            color={Theme.textSecondary}
-                          />
-                        </View>
-                        <Text style={[styles.menuItemText, { flex: 1 }]}>
-                          Settings
-                        </Text>
                         <Ionicons
-                          name={
-                            isSettingsExpanded ? "chevron-down" : "chevron-forward"
-                          }
-                          size={16}
+                          name="storefront-outline"
+                          size={18}
                           color={Theme.textSecondary}
                         />
-                      </TouchableOpacity>
-
-                      {isSettingsExpanded && (
-                        <View style={styles.subMenuContainer}>
-                          {canAccessStoreSettings() && (
-                            <TouchableOpacity
-                              style={styles.subMenuItem}
-                              onPress={() => {
-                                setIsMenuVisible(false);
-                                setIsSettingsVisible(true);
-                              }}
-                            >
-                              <View
-                                style={[
-                                  styles.menuIconContainer,
-                                  { backgroundColor: Theme.textSecondary + "10" },
-                                ]}
-                              >
-                                <Ionicons
-                                  name="storefront-outline"
-                                  size={18}
-                                  color={Theme.textSecondary}
-                                />
-                              </View>
-                              <Text style={styles.subMenuItemText}>
-                                Store Settings
-                              </Text>
-                            </TouchableOpacity>
-                          )}
-
-                          {canAccessStoreSettings() && (
-                            <TouchableOpacity
-                              style={styles.subMenuItem}
-                              onPress={() => {
-                                setIsMenuVisible(false);
-                                router.push("/general-settings");
-                              }}
-                            >
-                              <View
-                                style={[
-                                  styles.menuIconContainer,
-                                  { backgroundColor: Theme.primary + "10" },
-                                ]}
-                              >
-                                <Ionicons
-                                  name="options-outline"
-                                  size={18}
-                                  color={Theme.primary}
-                                />
-                              </View>
-                              <Text style={styles.subMenuItemText}>
-                                General Settings
-                              </Text>
-                            </TouchableOpacity>
-                          )}
-
-                          {canAccessReceiptSettings() && (
-                            <TouchableOpacity
-                              style={styles.subMenuItem}
-                              onPress={() => {
-                                setIsMenuVisible(false);
-                                router.push("/company-settings");
-                              }}
-                            >
-                              <View
-                                style={[
-                                  styles.menuIconContainer,
-                                  { backgroundColor: Theme.primary + "10" },
-                                ]}
-                              >
-                                <Ionicons
-                                  name="receipt-outline"
-                                  size={18}
-                                  color={Theme.primary}
-                                />
-                              </View>
-                              <Text style={styles.subMenuItemText}>
-                                Receipt Settings
-                              </Text>
-                            </TouchableOpacity>
-                          )}
-
-                          {canAccessStoreSettings() && (
-                            <TouchableOpacity
-                              style={styles.subMenuItem}
-                              onPress={() => {
-                                setIsMenuVisible(false);
-                                router.push("/terminal-settings");
-                              }}
-                            >
-                              <View
-                                style={[
-                                  styles.menuIconContainer,
-                                  { backgroundColor: Theme.primary + "10" },
-                                ]}
-                              >
-                                <Ionicons
-                                  name="hardware-chip-outline"
-                                  size={18}
-                                  color={Theme.primary}
-                                />
-                              </View>
-                              <Text style={styles.subMenuItemText}>
-                                Terminal Management
-                              </Text>
-                            </TouchableOpacity>
-                          )}
-
-                          {/* Cash Drawer */}
-                          <TouchableOpacity
-                            style={[styles.subMenuItem, !enableCashDrawer && { opacity: 0.4 }]}
-                            onPress={() => {
-                              if (!enableCashDrawer) {
-                                Alert.alert(
-                                  "Module Disabled",
-                                  "The Cash Drawer Module is currently disabled in General Settings. Please enable it in Settings to access this."
-                                );
-                                return;
-                              }
-                              setIsMenuVisible(false);
-                              router.push("/cash-drawer");
-                            }}
-                          >
-                            <View
-                              style={[
-                                styles.menuIconContainer,
-                                { backgroundColor: "#16A34A10" },
-                              ]}
-                            >
-                              <Ionicons
-                                name="cash-outline"
-                                size={18}
-                                color="#16A34A"
-                              />
-                            </View>
-                            <Text style={styles.subMenuItemText}>Cash Drawer</Text>
-                          </TouchableOpacity>
-
-                          {/* Customer Display */}
-                          <TouchableOpacity
-                            style={styles.subMenuItem}
-                            onPress={() => {
-                              setIsMenuVisible(false);
-                              router.push("/customer-display");
-                            }}
-                          >
-                            <View
-                              style={[
-                                styles.menuIconContainer,
-                                { backgroundColor: Theme.primary + "10" },
-                              ]}
-                            >
-                              <Ionicons
-                                name="desktop-outline"
-                                size={18}
-                                color={Theme.primary}
-                              />
-                            </View>
-                            <Text style={styles.subMenuItemText}>
-                              Customer Display
-                            </Text>
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </>
+                      </View>
+                      <Text style={styles.subMenuItemText}>
+                        Store Settings
+                      </Text>
+                    </TouchableOpacity>
                   )}
-                </>
+
+                  {!isWaiterUser && canAccessStoreSettings() && (
+                    <TouchableOpacity
+                      style={styles.subMenuItem}
+                      onPress={() => {
+                        setIsMenuVisible(false);
+                        router.push("/general-settings");
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.menuIconContainer,
+                          { backgroundColor: Theme.primary + "10" },
+                        ]}
+                      >
+                        <Ionicons
+                          name="options-outline"
+                          size={18}
+                          color={Theme.primary}
+                        />
+                      </View>
+                      <Text style={styles.subMenuItemText}>
+                        General Settings
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {!isWaiterUser && canAccessReceiptSettings() && (
+                    <TouchableOpacity
+                      style={styles.subMenuItem}
+                      onPress={() => {
+                        setIsMenuVisible(false);
+                        router.push("/company-settings");
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.menuIconContainer,
+                          { backgroundColor: Theme.primary + "10" },
+                        ]}
+                      >
+                        <Ionicons
+                          name="receipt-outline"
+                          size={18}
+                          color={Theme.primary}
+                        />
+                      </View>
+                      <Text style={styles.subMenuItemText}>
+                        Receipt Settings
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {!isWaiterUser && canAccessStoreSettings() && (
+                    <TouchableOpacity
+                      style={styles.subMenuItem}
+                      onPress={() => {
+                        setIsMenuVisible(false);
+                        router.push("/terminal-settings");
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.menuIconContainer,
+                          { backgroundColor: Theme.primary + "10" },
+                        ]}
+                      >
+                        <Ionicons
+                          name="hardware-chip-outline"
+                          size={18}
+                          color={Theme.primary}
+                        />
+                      </View>
+                      <Text style={styles.subMenuItemText}>
+                        Terminal Management
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Cash Drawer */}
+                  {!isWaiterUser && (
+                    <TouchableOpacity
+                      style={[styles.subMenuItem, !enableCashDrawer && { opacity: 0.4 }]}
+                      onPress={() => {
+                        if (!enableCashDrawer) {
+                          Alert.alert(
+                            "Module Disabled",
+                            "The Cash Drawer Module is currently disabled in General Settings. Please enable it in Settings to access this."
+                          );
+                          return;
+                        }
+                        setIsMenuVisible(false);
+                        router.push("/cash-drawer");
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.menuIconContainer,
+                          { backgroundColor: "#16A34A10" },
+                        ]}
+                      >
+                        <Ionicons
+                          name="cash-outline"
+                          size={18}
+                          color="#16A34A"
+                        />
+                      </View>
+                      <Text style={styles.subMenuItemText}>Cash Drawer</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Customer Display */}
+                  <TouchableOpacity
+                    style={styles.subMenuItem}
+                    onPress={() => {
+                      setIsMenuVisible(false);
+                      router.push("/customer-display");
+                    }}
+                  >
+                    <View
+                      style={[
+                        styles.menuIconContainer,
+                        { backgroundColor: Theme.primary + "10" },
+                      ]}
+                    >
+                      <Ionicons
+                        name="desktop-outline"
+                        size={18}
+                        color={Theme.primary}
+                      />
+                    </View>
+                    <Text style={styles.subMenuItemText}>
+                      Customer Display
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               )}
 
               {/* Legend in Menu for Mobile */}
@@ -4405,25 +4488,26 @@ export default function Category() {
         </TouchableWithoutFeedback>
       </Modal>
 
-      <View
-        style={[
-          styles.licenseCardContainer,
-          {
-            bottom: Math.max(insets.bottom, 12) + 12,
-            left: Math.max(insets.left, 12) + 12,
-            width: Platform.OS === "web" && width >= 1024 ? 350 : isTabletOrDesktopWeb ? 350 : "auto",
-            maxWidth: Platform.OS === "web" && width >= 1024 ? 350 : isTabletOrDesktopWeb ? 350 : 275,
-            paddingVertical: isTabletOrDesktopWeb ? 8 : 6,
-            paddingHorizontal: isTabletOrDesktopWeb ? 16 : 12,
-          },
-        ]}
-      >
+      {!isWaiterUser && (
         <View
           style={[
-            styles.licenseLogoContainer,
-            isTabletOrDesktopWeb && { width: 70, height: 70, borderRadius: 10 },
+            styles.licenseCardContainer,
+            {
+              bottom: Math.max(insets.bottom, 12) + 12,
+              left: Math.max(insets.left, 12) + 12,
+              width: Platform.OS === "web" && width >= 1024 ? 350 : isTabletOrDesktopWeb ? 350 : "auto",
+              maxWidth: Platform.OS === "web" && width >= 1024 ? 350 : isTabletOrDesktopWeb ? 350 : 275,
+              paddingVertical: isTabletOrDesktopWeb ? 8 : 6,
+              paddingHorizontal: isTabletOrDesktopWeb ? 16 : 12,
+            },
           ]}
         >
+          <View
+            style={[
+              styles.licenseLogoContainer,
+              isTabletOrDesktopWeb && { width: 70, height: 70, borderRadius: 10 },
+            ]}
+          >
           {licenseInfo?.CompanyLogoUrl ? (
             <Image
               source={{ uri: licenseInfo.CompanyLogoUrl }}
@@ -4567,6 +4651,7 @@ export default function Category() {
           </Text>
         </View>
       </View>
+      )}
     </SafeAreaView>
   );
 }

@@ -154,15 +154,15 @@ export const useAuthStore = create<AuthState>()(
       canAccessDayEnd:      () => get().can(FORM_CODES.DAILY_END),
       canAccessStoreSettings: () => {
         const role = get().user?.role;
-        return role === "ADMIN" || role === "MANAGER" || role === "OWNER" || role === "WAITER";
+        return role === "ADMIN" || role === "MANAGER" || role === "OWNER";
       },
       canAccessReceiptSettings: () => {
         const role = get().user?.role;
-        return role === "ADMIN" || role === "MANAGER" || role === "OWNER" || role === "WAITER";
+        return role === "ADMIN" || role === "MANAGER" || role === "OWNER";
       },
       canAccessWaiters: () => {
         const role = get().user?.role;
-        return role === "ADMIN" || role === "MANAGER" || role === "OWNER" || role === "WAITER";
+        return role === "ADMIN" || role === "MANAGER" || role === "OWNER";
       },
 
       /* ─── Role helpers ─── */

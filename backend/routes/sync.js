@@ -538,6 +538,100 @@ router.get("/pull", async (req, res) => {
       console.warn("⚠️ [TabletSync Pull] App settings fetch warning:", gsErr.message);
     }
 
+    // 8. Fetch Users (UserMaster & UserGroupMaster) for 100% offline APK counter login
+    let usersData = [];
+    try {
+      const usersRes = await pool.request().query(`
+        SELECT 
+          u.UserId as user_id, 
+          u.UserCode as user_code, 
+          u.UserName as user_name, 
+          u.UserPassword as user_password, 
+          u.FullName as full_name,
+          CASE WHEN u.IsDisabled = 1 THEN 1 ELSE 0 END as is_disabled,
+          u.UserGroupid as user_group_id,
+          ISNULL(g.UserGroupCode, 'CASHIER') as role,
+          ISNULL(g.UserGroupName, 'Cashier') as role_name
+        FROM UserMaster u WITH (NOLOCK)
+        LEFT JOIN UserGroupMaster g WITH (NOLOCK) ON u.UserGroupid = g.UserGroupId
+        WHERE u.IsDisabled = 0 OR u.IsDisabled IS NULL
+      `);
+      usersData = usersRes.recordset || [];
+    } catch (uErr) {
+      console.warn("⚠️ [TabletSync Pull] Users fetch warning:", uErr.message);
+    }
+
+    // 9. Fetch User Permissions
+    let permissionsData = [];
+    try {
+      const permRes = await pool.request().query(`
+        SELECT 
+          LTRIM(RTRIM(FormCode)) as form_code,
+          LTRIM(RTRIM(UserGroupCode)) as role,
+          CASE WHEN LTRIM(RTRIM(AllowAdd)) = 'A' THEN 1 ELSE 0 END as can_add,
+          CASE WHEN LTRIM(RTRIM(AllowUpdate)) = 'U' THEN 1 ELSE 0 END as can_update,
+          CASE WHEN LTRIM(RTRIM(AllowDelete)) = 'D' THEN 1 ELSE 0 END as can_delete,
+          CASE WHEN LTRIM(RTRIM(AllowRead)) = 'R' THEN 1 ELSE 0 END as can_read
+        FROM UserPermission WITH (NOLOCK)
+      `);
+      permissionsData = permRes.recordset || [];
+    } catch (pErr) {
+      console.warn("⚠️ [TabletSync Pull] Permissions fetch warning:", pErr.message);
+    }
+
+    // 10. Fetch Active Business Day (StartDate)
+    let activeBusinessDayData = null;
+    try {
+      const deRes = await pool.request().query(`
+        SELECT TOP 1 StartDate, username 
+        FROM DateEntry WITH (NOLOCK) 
+        ORDER BY CreatedDate DESC
+      `);
+      if (deRes.recordset.length > 0) {
+        const sDate = deRes.recordset[0].StartDate;
+        const formattedDate = sDate instanceof Date ? sDate.toISOString().split("T")[0] : String(sDate).split("T")[0];
+        activeBusinessDayData = {
+          startDate: formattedDate,
+          active: true,
+          username: deRes.recordset[0].username || "",
+        };
+      }
+    } catch (deErr) {
+      console.warn("⚠️ [TabletSync Pull] DateEntry fetch warning:", deErr.message);
+    }
+
+    // 11. Fetch License Info (Company Name, Address, Logo, FromDate, ToDate)
+    let licenseData = null;
+    try {
+      const licRes = await pool.request().query(`
+        SELECT TOP 1 
+          (SELECT TOP 1 CompanyName FROM CompanySettings WITH (NOLOCK)) AS CompanyName,
+          (SELECT TOP 1 Address FROM CompanySettings WITH (NOLOCK)) AS Address,
+          (SELECT TOP 1 CompanyLogoUrl FROM CompanySettings WITH (NOLOCK)) AS CompanyLogoUrl,
+          FromDate,
+          ToDate
+        FROM [dbo].[UserMaster] WITH (NOLOCK)
+        WHERE FromDate IS NOT NULL OR ToDate IS NOT NULL
+      `);
+      if (licRes.recordset.length > 0) {
+        licenseData = licRes.recordset[0];
+      } else {
+        const csFallback = await pool.request().query(`
+          SELECT TOP 1 CompanyName, Address, CompanyLogoUrl FROM CompanySettings WITH (NOLOCK)
+        `);
+        const csRow = csFallback.recordset[0] || {};
+        licenseData = {
+          CompanyName: csRow.CompanyName || "Smart POS",
+          Address: csRow.Address || "",
+          CompanyLogoUrl: csRow.CompanyLogoUrl || "",
+          FromDate: null,
+          ToDate: null,
+        };
+      }
+    } catch (licErr) {
+      console.warn("⚠️ [TabletSync Pull] License fetch warning:", licErr.message);
+    }
+
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -548,6 +642,10 @@ router.get("/pull", async (req, res) => {
       credit_customers: creditCustomersData,
       company_settings: companySettingsData,
       general_settings: generalSettingsData,
+      users: usersData,
+      permissions: permissionsData,
+      active_business_day: activeBusinessDayData,
+      license: licenseData,
     });
   } catch (error) {
     console.error("❌ [TabletSync Pull Error]:", error);
@@ -558,7 +656,9 @@ router.get("/pull", async (req, res) => {
 
 const {
   pushSalesToCloud,
+  pullSalesFromCloud,
   pullMasterFromCloud,
+  fullBidirectionalSync,
   getSyncStatus,
 } = require("../services/cloudSync.service");
 
@@ -592,16 +692,71 @@ router.post("/push-now", async (req, res) => {
 });
 
 /**
+ * POST /api/sync/pull-sales
+ * Pull any sales/bills made online or on another terminal down to local DB.
+ */
+router.post("/pull-sales", async (req, res) => {
+  try {
+    const io = req.app.get("io");
+    const result = await pullSalesFromCloud(io);
+    return res.json(result);
+  } catch (error) {
+    console.error("❌ [CloudSync Pull-Sales Error]:", error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
  * POST /api/sync/pull-now
- * Manually or on-demand pull updated Master Data (Dishes, Categories, Groups) from Central Cloud ERP to Local DB.
+ * Comprehensive Manual Pull: Pulls both updated Master Catalog (Dishes, Categories, Tables, Printers)
+ * AND pulls any online sales made on Cloud ERP to Local DB.
  */
 router.post("/pull-now", async (req, res) => {
   try {
     const io = req.app.get("io");
-    const result = await pullMasterFromCloud(io);
-    return res.json(result);
+    const {
+      getRemotePool,
+      syncMembersAndCreditCustomers,
+      syncSettingsAndSequences,
+    } = require("../services/cloudSync.service");
+    const { getPool } = require("../config/db");
+
+    const localPool = getPool() || (await poolPromise);
+    const remotePool = await getRemotePool();
+
+    // 1. Pull online sales from Cloud
+    const salesResult = await pullSalesFromCloud(io).catch((e) => ({ success: false, error: e.message, pulledCount: 0 }));
+    // 2. Pull master catalog (dishes, tables, paymodes) from Cloud
+    const masterResult = await pullMasterFromCloud(io).catch((e) => ({ success: false, error: e.message, dishCount: 0 }));
+    // 3. Sync members and settings bidirectional
+    await syncMembersAndCreditCustomers(remotePool, localPool).catch(() => {});
+    await syncSettingsAndSequences(remotePool, localPool).catch(() => {});
+
+    return res.json({
+      success: true,
+      dishCount: masterResult?.dishCount || 0,
+      pulledSalesCount: salesResult?.pulledCount || 0,
+      salesResult,
+      masterResult,
+      message: `Pulled ${masterResult?.dishCount || 0} menu items and ${salesResult?.pulledCount || 0} online sales from Cloud ERP.`,
+    });
   } catch (error) {
     console.error("❌ [CloudSync Pull-Now Error]:", error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/sync/bidirectional
+ * Performs complete 2-way sync: pushes local sales, pulls online sales, pulls master catalog.
+ */
+router.post("/bidirectional", async (req, res) => {
+  try {
+    const io = req.app.get("io");
+    const result = await fullBidirectionalSync(io);
+    return res.json(result);
+  } catch (error) {
+    console.error("❌ [CloudSync Bidirectional Error]:", error);
     return res.status(500).json({ success: false, error: error.message });
   }
 });
