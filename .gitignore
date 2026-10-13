@@ -10,6 +10,8 @@ node_modules/
 .expo-shared/
 web-build/
 dist/
+dist-installer/
+print-bridge/dist-installer/
 expo-env.d.ts
 
 # =========================

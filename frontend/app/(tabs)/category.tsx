@@ -1864,6 +1864,10 @@ export default function Category() {
     }
 
     setOrderContext(newContext);
+    const existingOrderId = item.currentOrderId || (item as any).orderId || tableData?.orderId;
+    if (existingOrderId && newContext.tableId && existingOrderId !== "NEW" && existingOrderId !== "#NEW") {
+      useCartStore.getState().setTableOrderId(newContext.tableId, existingOrderId);
+    }
     const contextId = getContextId(newContext);
     if (contextId) {
       setCurrentContext(contextId);

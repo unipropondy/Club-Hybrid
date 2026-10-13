@@ -11,5 +11,16 @@
       "envManager": "ms-python.python:venv",
       "packageManager": "ms-python.python:pip"
     }
-  ]
+  ],
+  "gradle.nestedProjects": false,
+  "gradle.projectOpenBehavior": "NotOpen",
+  "gradle.projects": [
+    "frontend/android"
+  ],
+  "java.import.gradle.projectOpenNew": "disabled",
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.git/**": true,
+    "**/dist-installer/**": true
+  }
 }

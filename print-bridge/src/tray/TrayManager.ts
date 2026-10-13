@@ -4,6 +4,7 @@ import { launchCounterPOSWindow, focusCounterPOSWindow } from '../posWindow/Coun
 import { launchCustomerDisplay } from '../customerDisplay/CustomerDisplayManager';
 import { config } from '../config';
 import { logger } from '../logger';
+import { stopBackendProcess } from '../backend/BackendManager';
 
 let tray: Tray | null = null;
 
@@ -56,7 +57,8 @@ export function initTray(): Tray | null {
         label: '❌ Exit UniPro POS',
         click: () => {
           logger.info('[Tray] User requested full application exit.');
-          electronApp.exit(0);
+          stopBackendProcess();
+          electronApp.quit();
         },
       },
     ]);

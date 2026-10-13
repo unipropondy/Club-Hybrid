@@ -610,7 +610,15 @@ export default function SummaryScreen() {
   useEffect(() => {
     // 1. Sync official Order ID from DB
     if (context?.tableId) {
-      fetch(`${API_URL}/api/tables/${context.tableId}`)
+      const localOid = useCartStore.getState().tableOrderIds[context.tableId]
+        || useTableStatusStore.getState().tableMap[context.tableId.toLowerCase()]?.orderId;
+      if (localOid && localOid !== "NEW" && localOid !== "#NEW") {
+        useCartStore.getState().setTableOrderId(context.tableId, localOid);
+      }
+
+      const ctrl = new AbortController();
+      const tm = setTimeout(() => ctrl.abort(), 600);
+      fetch(`${API_URL}/api/tables/${context.tableId}`, { signal: ctrl.signal })
         .then((res) => res.json())
         .then((data) => {
           const oid = data.table?.currentOrderId || data.table?.CurrentOrderId;
@@ -3530,7 +3538,9 @@ export default function SummaryScreen() {
                       router.replace("/(tabs)/category");
                       return;
                     }
-                    const canPay = permissions["OPRSET"]?.canAdd;
+                    const authState = useAuthStore.getState();
+                    const isAdminOrStaff = authState.isAdmin() || authState.isManager() || authState.isSupervisor() || authState.isCashier() || !isWaiter();
+                    const canPay = isAdminOrStaff || permissions["OPRSET"]?.canAdd === true || permissions["OPRSET"]?.canRead === true;
                     if (!canPay) {
                       if (Platform.OS === "web") {
                         router.replace("/(tabs)/category");

@@ -188,6 +188,9 @@ class UniversalPrinter {
 
   private static async isIpReachable(ip: string, port: number = 80, timeoutMs: number = 600): Promise<boolean> {
     if (!ip || ip.trim() === "") return false;
+    // 🛡️ CRITICAL: NEVER probe port 9100 with HTTP fetch!
+    // Thermal printers interpret HTTP GET text bytes as print data and print okhttp headers on receipts.
+    if (port === 9100 || Platform.OS === "android") return true;
     const cleanIp = ip.trim();
     const isIp = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(cleanIp);
     if (!isIp) return false;
@@ -482,6 +485,19 @@ class UniversalPrinter {
     }
   }
 
+  static async detectUsbPrinters(): Promise<Array<{ name: string; port: string; status: string; isUsb: boolean }>> {
+    try {
+      const res = await fetch(`http://localhost:3050/api/printers`);
+      const data = await res.json();
+      if (data && data.success && Array.isArray(data.printers)) {
+        return data.printers;
+      }
+    } catch (e) {
+      console.warn("[UniversalPrinter] Could not fetch USB printers from print bridge:", e);
+    }
+    return [];
+  }
+
   // ==================== KOT PRINTING (80mm) ====================
   private static async logPrintJob(
     orderId: string,
@@ -722,7 +738,7 @@ class UniversalPrinter {
         let isReachable = false;
         const isIp = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(targetIp.trim());
         if (isIp) {
-          isReachable = await this.isIpReachable(targetIp, 9100);
+          isReachable = Platform.OS === "android" ? true : await this.isIpReachable(targetIp);
         } else {
           isReachable = true;
         }
@@ -1358,7 +1374,11 @@ class UniversalPrinter {
 
         const pType = isTakeaway ? 3 : 1;
         console.log(`📡 [Web Print Bridge] Queueing receipt to printer type: ${pType}`);
-        const success = await this.queuePrintJob(pType, undefined, text);
+        const targetIp = isTakeaway
+          ? (company.takeawayIp || company.printerIp || "")
+          : (company.printerIp || "");
+        console.log(`📡 [Web Print Bridge] Queueing receipt (Type ${pType}, Target: ${targetIp || "default"})`);
+        const success = await this.queuePrintJob(pType, undefined, text, targetIp);
         if (success) return true;
 
         // 🚀 Fallback: If Print Bridge failed or printer not detected on web, trigger iframe print preview immediately

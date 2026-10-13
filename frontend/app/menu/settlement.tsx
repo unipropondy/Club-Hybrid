@@ -851,6 +851,56 @@ const fetchDayHistory = async () => {
       setCashBoxEntries(cashBoxRes.data?.data || []);
       setDayLog(dayLogRes.data?.data || null);
 
+      // 🛡️ OFFLINE FALLBACK: If total sales or payments are empty, calculate directly from local SQLite orders
+      if (!totalRes.data?.GrossTotal && !totalRes.data?.NetTotal) {
+        try {
+          const { executeQuery } = require("../../db/database");
+          const datePrefix = `${dateStr}%`;
+          const orderRows = await executeQuery(
+            `SELECT total_amount, subtotal, tax_amount, discount_amount, payment_method, status, payment_status, created_at 
+             FROM orders 
+             WHERE (payment_status = 'PAID' OR status = 'COMPLETED') 
+             AND created_at LIKE ?`,
+            [datePrefix]
+          );
+          if (Array.isArray(orderRows) && orderRows.length > 0) {
+            let gross = 0;
+            let net = 0;
+            let tax = 0;
+            let disc = 0;
+            const payMap: Record<string, number> = {};
+
+            orderRows.forEach((r: any) => {
+              const tot = Number(r.total_amount || 0);
+              gross += tot;
+              net += Number(r.subtotal || tot);
+              tax += Number(r.tax_amount || 0);
+              disc += Number(r.discount_amount || 0);
+              const pm = (r.payment_method || "CASH").toUpperCase();
+              payMap[pm] = (payMap[pm] || 0) + tot;
+            });
+
+            const localPayments = Object.keys(payMap).map(k => ({
+              PaymodeName: k,
+              Amount: payMap[k].toFixed(2)
+            }));
+
+            setTotalSales({
+              GrossTotal: gross.toFixed(2),
+              NetTotal: net.toFixed(2),
+              TaxTotal: tax.toFixed(2),
+              DiscountTotal: disc.toFixed(2),
+              TotalBills: orderRows.length
+            });
+
+            setPayments(localPayments);
+            console.log(`💾 [Settlement] Loaded ${orderRows.length} offline orders from local SQLite for date ${dateStr}`);
+          }
+        } catch (sqliteErr) {
+          console.warn("Local SQLite settlement query error:", sqliteErr);
+        }
+      }
+
       if (openRes.data?.data?.total) {
         setOpeningCash(openRes.data.data.total.toString());
       } else if (openRes.data?.total) {
@@ -1433,6 +1483,7 @@ const fetchDayHistory = async () => {
       // Helper function for robust reachability check
       const checkIpReachable = async (ip: string, port = 80, timeoutMs = 600): Promise<boolean> => {
         if (!ip || ip.trim() === "") return false;
+        if (port === 9100 || Platform.OS === "android") return true;
         const cleanIp = ip.trim();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -40,6 +40,22 @@
       {
         "from": "customer-display-web",
         "to": "customer-display-web"
+      },
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          ".env",
+          "!**/node_modules/.cache/**",
+          "!**/*.log",
+          "!error_log.txt",
+          "!**/scratch/**"
+        ]
+      },
+      {
+        "from": "bin",
+        "to": "bin"
       }
     ],
     "win": {

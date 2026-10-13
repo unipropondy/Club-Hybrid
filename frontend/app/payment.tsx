@@ -1,3 +1,4 @@
+import { OfflineOrderSequence } from "../utils/OfflineOrderSequence";
 import { API_URL } from "@/constants/Config";
 import { FontAwesome5, Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, usePathname, useRouter } from "expo-router";
@@ -1899,7 +1900,7 @@ export default function PaymentScreen() {
         const offlineBillNo =
           displayOrderId ||
           saleData.orderId ||
-          `OFF-${(user?.userCode || "TAB").replace(/[^a-zA-Z0-9]/g, "").substring(0, 4)}-${Date.now().toString().slice(-6)}`;
+          await OfflineOrderSequence.getNextOrderNumber();
 
         // 1. Save completed order into local SQLite
         await OrderRepository.createOrder(

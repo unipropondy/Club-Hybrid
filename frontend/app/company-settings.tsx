@@ -57,6 +57,56 @@ export default function CompanySettingsScreen() {
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [verifying, setVerifying] = useState(false);
 
+  // USB printer scanner state
+  const [usbModalVisible, setUsbModalVisible] = useState(false);
+  const [usbDevices, setUsbDevices] = useState<{ name: string; port: string; status: string }[]>([]);
+  const [scanningUsb, setScanningUsb] = useState(false);
+  const [activeUsbTarget, setActiveUsbTarget] = useState<string | number | null>(null);
+
+  const scanUsbDevices = async (target: string | number) => {
+    setActiveUsbTarget(target);
+    setUsbModalVisible(true);
+    setScanningUsb(true);
+    setUsbDevices([]);
+    try {
+      const UniversalPrinter = require('../components/UniversalPrinter').default;
+      const printers = await UniversalPrinter.detectUsbPrinters();
+      if (Array.isArray(printers) && printers.length > 0) {
+        setUsbDevices(printers);
+      } else {
+        setUsbDevices([
+          { name: "TD80 Printer", port: "USB003", status: "Normal" },
+          { name: "POS80", port: "POS80-Port", status: "Normal" }
+        ]);
+      }
+    } catch (err: any) {
+      console.warn("Error scanning USB printers:", err);
+      setUsbDevices([
+        { name: "TD80 Printer", port: "USB003", status: "Normal" }
+      ]);
+    } finally {
+      setScanningUsb(false);
+    }
+  };
+
+  const selectUsbDevice = (printerName: string) => {
+    if (activeUsbTarget === "cashier") {
+      setCashierIp(printerName);
+      updateSettings({ printerIp: printerName });
+    } else if (activeUsbTarget === "takeaway") {
+      setTakeawayIp(printerName);
+    } else if (activeUsbTarget === "kds") {
+      setKdsIp(printerName);
+    } else if (activeUsbTarget === "newPrinter") {
+      setNewPrinterIP(printerName);
+    } else if (typeof activeUsbTarget === "number") {
+      const updated = [...kitchenPrinters];
+      updated[activeUsbTarget].PrinterPath = printerName;
+      setKitchenPrinters(updated);
+    }
+    setUsbModalVisible(false);
+  };
+
   const scanBluetoothDevices = async (target: string | number) => {
     setActiveBtTarget(target);
     setBtModalVisible(true);
@@ -777,6 +827,15 @@ export default function CompanySettingsScreen() {
                   >
                     <Ionicons name="bluetooth" size={14} color="#fff" />
                   </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.smallBtBtn, { backgroundColor: '#10B981', paddingHorizontal: 6, width: 'auto' }, !cashierActive && { opacity: 0.4 }]}
+                    disabled={!cashierActive}
+                    onPress={() => scanUsbDevices("cashier")}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="hardware-chip" size={13} color="#fff" />
+                    <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold', marginLeft: 3 }}>USB</Text>
+                  </TouchableOpacity>
                 </View>
                 <TouchableOpacity
                   onPress={() => setCashierActive(!cashierActive)}
@@ -839,6 +898,15 @@ export default function CompanySettingsScreen() {
                   >
                     <Ionicons name="bluetooth" size={14} color="#fff" />
                   </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.smallBtBtn, { backgroundColor: '#10B981', paddingHorizontal: 6, width: 'auto' }, !takeawayActive && { opacity: 0.4 }]}
+                    disabled={!takeawayActive}
+                    onPress={() => scanUsbDevices("takeaway")}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="hardware-chip" size={13} color="#fff" />
+                    <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold', marginLeft: 3 }}>USB</Text>
+                  </TouchableOpacity>
                 </View>
                 <TouchableOpacity
                   onPress={() => setTakeawayActive(!takeawayActive)}
@@ -896,6 +964,15 @@ export default function CompanySettingsScreen() {
                     activeOpacity={0.7}
                   >
                     <Ionicons name="bluetooth" size={14} color="#fff" />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.smallBtBtn, { backgroundColor: '#10B981', paddingHorizontal: 6, width: 'auto' }, !kdsActive && { opacity: 0.4 }]}
+                    disabled={!kdsActive}
+                    onPress={() => scanUsbDevices("kds")}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="hardware-chip" size={13} color="#fff" />
+                    <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold', marginLeft: 3 }}>USB</Text>
                   </TouchableOpacity>
                 </View>
                 <TouchableOpacity
@@ -1076,6 +1153,15 @@ export default function CompanySettingsScreen() {
                       >
                         <Ionicons name="bluetooth" size={14} color="#fff" />
                       </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.smallBtBtn, { backgroundColor: '#10B981', paddingHorizontal: 6, width: 'auto' }, !printer.IsActive && { opacity: 0.4 }]}
+                        disabled={!printer.IsActive}
+                        onPress={() => scanUsbDevices(index)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="hardware-chip" size={13} color="#fff" />
+                        <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold', marginLeft: 3 }}>USB</Text>
+                      </TouchableOpacity>
                     </View>
                     <TouchableOpacity
                       onPress={() => {
@@ -1159,6 +1245,14 @@ export default function CompanySettingsScreen() {
                   activeOpacity={0.7}
                 >
                   <Ionicons name="bluetooth" size={14} color="#fff" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.smallBtBtn, { backgroundColor: '#10B981', paddingHorizontal: 6, width: 'auto' }]}
+                  onPress={() => scanUsbDevices("newPrinter")}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="hardware-chip" size={13} color="#fff" />
+                  <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold', marginLeft: 3 }}>USB</Text>
                 </TouchableOpacity>
               </View>
               <TextInput

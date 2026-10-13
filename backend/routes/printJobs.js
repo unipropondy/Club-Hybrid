@@ -181,7 +181,7 @@ router.post('/:jobId/failed', authenticateBridge, async (req, res) => {
 // 5. POST /api/print-jobs - Queue a new print job from the frontend Web version
 router.post('/', authenticateBridge, async (req, res) => {
   try {
-    const { printerType, kitchenTypeValue, content, targetIp } = req.body;
+    const { printerType, kitchenTypeValue, content, targetIp, targetPrinterIp, printerIp: bodyPrinterIp } = req.body;
     const storeId = req.storeId;
 
     if (printerType === undefined || !content) {
@@ -191,7 +191,7 @@ router.post('/', authenticateBridge, async (req, res) => {
     const pool = getPool();
 
     // Resolve Printer IP and Name from PrintMaster
-    let printerIp = targetIp ? String(targetIp).trim() : '';
+    let printerIp = (targetPrinterIp || targetIp || bodyPrinterIp || '').trim();
     let printerName = '';
     const pType = parseInt(printerType);
 
@@ -237,8 +237,23 @@ router.post('/', authenticateBridge, async (req, res) => {
         printerIp = cashierRes.recordset[0].PrinterIP;
         printerName = cashierRes.recordset[0].PrinterName;
       } else {
-        return res.status(400).json({ success: false, error: 'No active printer configured in database' });
+        try {
+          const companyRes = await pool.request()
+            .query("SELECT TOP 1 PrinterIP, CashierPrinterIP FROM CompanySettings WHERE Id = '1'");
+          if (companyRes.recordset.length > 0) {
+            printerIp = companyRes.recordset[0].CashierPrinterIP || companyRes.recordset[0].PrinterIP || '';
+            printerName = printerIp || 'Cashier Printer';
+          }
+        } catch (cErr) {
+          console.warn('[PrintQueue] CompanySettings fallback check error:', cErr.message);
+        }
       }
+    }
+
+    if (!printerIp || printerIp.trim() === '') {
+      printerIp = 'Receipt Printer';
+      printerName = 'Receipt Printer';
+    }
     }
 
     const jobId = require('crypto').randomUUID();

@@ -129,8 +129,9 @@ export function launchCounterPOSWindow(): BrowserWindow {
   });
 
   counterPOSWindow.on('closed', () => {
-    logger.info('[CounterPOS] Window closed by user.');
+    logger.info('[CounterPOS] Window closed by user. Terminating application...');
     counterPOSWindow = null;
+    electronApp.quit();
   });
 
   tryLoad();

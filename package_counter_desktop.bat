@@ -9,6 +9,7 @@ echo  Windows (.exe) installer bundling:
 echo    1. Cashier Counter POS UI (Primary Monitor)
 echo    2. Dual-Monitor Customer Facing Display (Secondary Monitor)
 echo    3. Thermal Print Bridge & LAN Hub (Port 3050)
+echo    4. Embedded Node.js Backend Server (Port 5000 with Auto-Launch)
 echo =====================================================================
 echo.
 

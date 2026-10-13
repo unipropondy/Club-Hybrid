@@ -1,0 +1,12 @@
+{
+  "gradle.nestedProjects": false,
+  "gradle.projectOpenBehavior": "NotOpen",
+  "gradle.projects": [
+    "android"
+  ],
+  "java.import.gradle.projectOpenNew": "disabled",
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.git/**": true
+  }
+}

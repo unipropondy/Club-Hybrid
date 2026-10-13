@@ -1,3 +1,4 @@
+import { OfflineOrderSequence } from "../utils/OfflineOrderSequence";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import React, { useEffect, useMemo, useState } from "react";
@@ -1112,7 +1113,27 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
   useEffect(() => {
     // ✅ Sync official Order ID from DB whenever table changes
     if (orderContext?.tableId) {
-      fetch(`${API_URL}/api/tables/${orderContext.tableId}`)
+      // Instant local check first (0ms)
+      const tId = orderContext.tableId;
+      const cachedOid = useCartStore.getState().tableOrderIds[tId]
+        || useTableStatusStore.getState().tableMap[tId.toLowerCase()]?.orderId;
+      if (cachedOid && cachedOid !== "NEW" && cachedOid !== "#NEW") {
+        useCartStore.getState().setTableOrderId(tId, cachedOid);
+      } else {
+        try {
+          const { TableRepository } = require("../db/TableRepository");
+          TableRepository.getCachedTables().then((tables: any[]) => {
+            const row = tables.find((t: any) => t.id === tId.toLowerCase());
+            if (row?.currentOrderId) {
+              useCartStore.getState().setTableOrderId(tId, row.currentOrderId);
+            }
+          }).catch(() => {});
+        } catch (_) {}
+      }
+
+      const ctrl = new AbortController();
+      const tm = setTimeout(() => ctrl.abort(), 600);
+      fetch(`${API_URL}/api/tables/${orderContext.tableId}`, { signal: ctrl.signal })
         .then((res) => res.json())
         .then((data) => {
           const oid = data.table?.currentOrderId || data.table?.CurrentOrderId;
@@ -1129,6 +1150,20 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
     }
   }, [orderContext?.tableId]);
 
+
+  // 🏷️ INSTANT LOCAL ORDER ID GENERATION (0ms speed when offline)
+  useEffect(() => {
+    if (orderContext?.tableId && cart.length > 0) {
+      const tId = orderContext.tableId;
+      const existingOid = useCartStore.getState().tableOrderIds[tId]
+        || useTableStatusStore.getState().tableMap[tId.toLowerCase()]?.orderId;
+      if (!existingOid || existingOid === "NEW" || existingOid === "#NEW") {
+        OfflineOrderSequence.getNextOrderNumber().then((newOid) => {
+          useCartStore.getState().setTableOrderId(tId, newOid);
+        }).catch(() => {});
+      }
+    }
+  }, [orderContext?.tableId, cart.length]);
 
   // 🖥️ CUSTOMER DISPLAY — JOIN TERMINAL ROOM (POS device side)
   useEffect(() => {
@@ -1639,14 +1674,10 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
             ? `Table ${orderContext.tableNo || ""}` 
             : `TW-${orderContext.takeawayNo || ""}`;
 
-          const waiterTag = (user?.userCode || user?.userName || "TAB")
-            .replace(/[^a-zA-Z0-9]/g, "")
-            .substring(0, 4)
-            .toUpperCase();
           const generatedOrderNo =
             currentOrderId && currentOrderId !== "NEW" && currentOrderId !== "#NEW"
               ? currentOrderId
-              : `W-${waiterTag}-${Date.now().toString().slice(-6)}`;
+              : (currentTableOrderId || await OfflineOrderSequence.getNextOrderNumber());
 
           await OrderRepository.createOrder(
             {
@@ -1680,6 +1711,19 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
             }))
           );
           console.log(`💾 [CartSidebar] Saved order ${generatedOrderNo} locally into SQLite!`);
+          if (orderContext.tableId) {
+            useCartStore.getState().setTableOrderId(orderContext.tableId, generatedOrderNo);
+            useTableStatusStore.getState().updateTableStatus(
+              orderContext.tableId,
+              orderContext.section || "",
+              orderContext.tableNo || "",
+              generatedOrderNo,
+              "SENT",
+              Date.now(),
+              undefined,
+              payableAmount
+            );
+          }
 
           // Update local table repository to Occupied (Status: 1)
           if (orderContext.tableId) {
@@ -1821,10 +1865,10 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
               : `${formatSectionGlobal(orderContext.section || "")} - T${orderContext.tableNo}`}
           </Text>
           {orderContext.tableId &&
-            currentTableOrderId &&
+            (currentTableOrderId || activeOrder?.orderId || tableData?.orderId) &&
             (cart.length > 0 || currentTableStatus !== "EMPTY") && (
               <Text style={styles.orderIdLabel}>
-                Order ID: {currentTableOrderId}
+                Order ID: {currentTableOrderId || activeOrder?.orderId || tableData?.orderId}
               </Text>
             )}
         </View>

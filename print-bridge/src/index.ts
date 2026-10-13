@@ -6,7 +6,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { config } from './config';
 import { startPoller, pollerStats } from './poller';
-import { sendToPrinter, checkPrinterReachable } from './printer';
+import { sendToPrinter, checkPrinterReachable, getInstalledPrinters } from './printer';
 import { logger } from './logger';
 import {
   startMonitorWatcher,
@@ -25,6 +25,7 @@ import {
   focusCounterPOSWindow,
 } from './posWindow/CounterPOSManager';
 import { initTray } from './tray/TrayManager';
+import { startBackendProcess, stopBackendProcess } from './backend/BackendManager';
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -149,6 +150,16 @@ app.get('/api/status', (req: Request, res: Response) => {
     kitchenRoutes:  'Via Railway backend',
     cashierPrinter: 'Receipt Printer (TCP)',
   });
+});
+
+// 1.45 GET /api/printers - List all installed system printers (including USB printers)
+app.get('/api/printers', async (req: Request, res: Response) => {
+  try {
+    const printers = await getInstalledPrinters();
+    res.json({ success: true, printers });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // 1.5 GET /api/logs - Return latest 100 log lines
@@ -367,12 +378,15 @@ app.get('*', (req: Request, res: Response, next) => {
 });
 
 // Initialize Electron Lifecycle
-electronApp.whenReady().then(() => {
-  logger.info('[Electron] Platform ready. Starting services...');
+electronApp.whenReady().then(async () => {
+  logger.info('[Electron] Platform ready. Launching embedded backend...');
 
-  // Launch the Express listener + poller first
+  // 0. Auto-spawn backend service (Method 2: One-Click Embedded Backend)
+  await startBackendProcess();
+
+  // Launch the Express listener + poller
   app.listen(config.port, () => {
-    logger.info(`UniPro Print Bridge server listening locally on port ${config.port}`);
+    logger.info(`UniPro Print Bridge & POS Hub listening locally on port ${config.port}`);
     startPoller();
 
     loadPersistedState();
@@ -410,7 +424,20 @@ electronApp.whenReady().then(() => {
   });
 });
 
-// Avoid app shutdown when window closes (our tray/express server remains running)
-electronApp.on('window-all-closed', (e: Event) => {
-  e.preventDefault();
+// App termination hooks: Cleanly shut down backend process and child trees
+electronApp.on('before-quit', () => {
+  logger.info('[Electron] before-quit event: Shutting down backend process...');
+  stopBackendProcess();
 });
+
+electronApp.on('will-quit', () => {
+  logger.info('[Electron] will-quit event: Shutting down backend process...');
+  stopBackendProcess();
+});
+
+electronApp.on('window-all-closed', () => {
+  logger.info('[Electron] All windows closed. Quitting application and shutting down backend...');
+  stopBackendProcess();
+  electronApp.quit();
+});
+
