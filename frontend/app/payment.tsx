@@ -504,18 +504,24 @@ export default function PaymentScreen() {
       ? `${API_URL}/api/credit-customers/search?query=${encodeURIComponent(q)}`
       : `${API_URL}/api/members/search?query=${encodeURIComponent(q)}`;
     try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 2500);
       const res = await fetch(endpoint, {
+        signal: ctrl.signal,
         headers: useAuthStore.getState().token ? { Authorization: `Bearer ${useAuthStore.getState().token}` } : {},
       });
+      clearTimeout(timer);
       const data = await res.json();
       setMembers(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.error("Search members error:", err);
-      showToast({
-        type: "error",
-        message: "Search Failed",
-        subtitle: "Could not search accounts",
-      });
+      console.log("ℹ️ [Payment] Offline: searching members from local SQLite...");
+      try {
+        const { MemberRepository } = require("../db/MemberRepository");
+        const localMembers = await MemberRepository.searchOffline(q, isCredit);
+        setMembers(localMembers || []);
+      } catch (_) {
+        setMembers([]);
+      }
     } finally {
       setSearchingMembers(false);
     }
@@ -1751,7 +1757,10 @@ export default function PaymentScreen() {
     };
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
       const response = await fetch(`${API_URL}/api/sales/save`, {
+        signal: controller.signal,
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1759,6 +1768,7 @@ export default function PaymentScreen() {
         },
         body: JSON.stringify(saleData),
       });
+      clearTimeout(timeoutId);
       const result = await response.json();
       if (result.success) {
         // 🏆 REWARD REDEMPTION SYNC:
@@ -1932,6 +1942,27 @@ export default function PaymentScreen() {
           subtitle: `Saved locally (${offlineBillNo}). Will sync automatically once connected.`,
           duration: 4000,
         });
+
+        // Update local table repository to Available (0)
+        if (context?.tableId) {
+          try {
+            const { TableRepository } = require("../db/TableRepository");
+            TableRepository.updateTableStatus(context.tableId, 0, 0, null).catch(() => {});
+          } catch (_) {}
+        }
+
+        // Deduct member credit balance locally if paying via credit/member
+        const activeMemberId = memberOverride?.MemberId || selectedMember?.MemberId || null;
+        if (activeMemberId) {
+          try {
+            const { MemberRepository } = require("../db/MemberRepository");
+            MemberRepository.deductCreditBalanceLocally(
+              activeMemberId,
+              total,
+              method.trim().toUpperCase() === "CREDIT"
+            ).catch(() => {});
+          } catch (_) {}
+        }
 
         // 2. Navigate to payment_success with offline bill info
         router.push({

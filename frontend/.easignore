@@ -14,3 +14,5 @@ customer-display-web/
 android/app/build/
 android/.gradle/
 android/build/
+android/app/.cxx/
+**/.cxx/

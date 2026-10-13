@@ -657,7 +657,10 @@ export default function Category() {
     if (isMovingTable) return;
     setIsMovingTable(true);
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
       const res = await fetch(`${API_URL}/api/tables/move`, {
+        signal: controller.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -666,6 +669,7 @@ export default function Category() {
           userId: user?.userId,
         }),
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
       if (res.ok && data.success) {
         // Optimistic: clear source cart context in store
@@ -773,11 +777,116 @@ export default function Category() {
         });
       }
     } catch (err) {
-      showToast({
-        type: "error",
-        message: "Network Error",
-        subtitle: "Failed to connect to server.",
-      });
+      console.warn("⚠️ [Move Table] Network unavailable - applying offline table move:", err);
+      try {
+        const { TableRepository } = require("../../db/TableRepository");
+        TableRepository.updateTableStatus(src.id, 0, 0, null, null, null).catch(() => {});
+        TableRepository.updateTableStatus(
+          dst.id,
+          src.Status || 1,
+          src.totalAmount || 0,
+          src.currentOrderId || null,
+          src.customerName || null,
+          src.pax || null
+        ).catch(() => {});
+
+        const srcSection = getSectionFromDiningSection(src.DiningSection);
+        const dstSection = getSectionFromDiningSection(dst.DiningSection);
+
+        // Update local state (allTables)
+        setAllTables((prev: TableItem[]) =>
+          prev.map((t: TableItem) => {
+            if (t.id === src.id) {
+              return {
+                ...t,
+                Status: 0,
+                totalAmount: 0,
+                currentOrderId: undefined,
+                customerName: undefined,
+                pax: undefined,
+              };
+            }
+            if (t.id === dst.id) {
+              return {
+                ...t,
+                Status: src.Status,
+                totalAmount: src.totalAmount || 0,
+                currentOrderId: src.currentOrderId,
+                customerName: src.customerName,
+                pax: src.pax,
+              };
+            }
+            return t;
+          })
+        );
+
+        // Update tableStatusStore
+        useTableStatusStore.getState().updateTableStatus(
+          src.id,
+          srcSection,
+          src.label,
+          "SYNC",
+          "EMPTY",
+          undefined,
+          undefined,
+          0
+        );
+
+        const srcStatusType: TableStatusType =
+          src.Status === 5 ? "LOCKED" : src.Status === 1 ? "SENT" : src.Status === 2 ? "BILL_REQUESTED" : "EMPTY";
+        useTableStatusStore.getState().updateTableStatus(
+          dst.id,
+          dstSection,
+          dst.label,
+          src.currentOrderId || "OFF-MOVE",
+          srcStatusType,
+          undefined,
+          undefined,
+          src.totalAmount || 0
+        );
+
+        // Move cart context in memory
+        const srcContext = {
+          orderType: "DINE_IN" as const,
+          section: srcSection,
+          tableNo: src.label,
+          tableId: src.id,
+        };
+        const srcContextId = getContextId(srcContext);
+        if (srcContextId) {
+          const { carts, setCartItems } = useCartStore.getState();
+          const itemsToMove = carts[srcContextId] || [];
+          if (itemsToMove.length > 0) {
+            const dstContext = {
+              orderType: "DINE_IN" as const,
+              section: dstSection,
+              tableNo: dst.label,
+              tableId: dst.id,
+            };
+            const dstContextId = getContextId(dstContext);
+            if (dstContextId) setCartItems(dstContextId, itemsToMove);
+            setCartItems(srcContextId, []);
+          }
+        }
+
+        setIsMoveTableVisible(false);
+        setMoveSourceTable(null);
+        setMoveDestTable(null);
+        setMoveStep("source");
+        setMoveSearchQuery("");
+
+        showToast({
+          type: "warning",
+          message: "Table Moved Offline",
+          subtitle: `Table ${src.label} → Table ${dst.label} (Saved locally)`,
+        });
+      } catch (offlineErr: any) {
+        showToast({
+          type: "error",
+          message: "Move Error",
+          subtitle: offlineErr.message || "Failed to move table locally.",
+        });
+      }
     } finally {
       setIsMovingTable(false);
     }
@@ -1052,9 +1161,53 @@ export default function Category() {
 
   const fetchTables = async () => {
     lastTablesFetchTime = Date.now();
+
+    // ⚡ 1. INSTANT LOCAL-FIRST RESTORE (0ms lag): Read from phone SQLite cache immediately
+    try {
+      const { TableRepository } = require("../../db/TableRepository");
+      const cached = await TableRepository.getCachedTables();
+      if (cached && cached.length > 0) {
+        setAllTables((prev) => (prev.length === 0 ? cached : prev));
+        setLoading(false);
+
+        const updates = cached.map((t: any) => {
+          let finalStartTime = 0;
+          if (t.StartTime) {
+            const parsed = parseDatabaseDate(t.StartTime).getTime();
+            if (!isNaN(parsed)) finalStartTime = parsed;
+          }
+          return {
+            tableId: t.id,
+            section: getSectionFromDiningSection(t.DiningSection),
+            tableNo: t.label,
+            orderId: t.currentOrderId || "EMPTY",
+            status: (t.Status === 5
+              ? "LOCKED"
+              : t.Status === 1
+                ? "SENT"
+                : t.Status === 2
+                  ? "BILL_REQUESTED"
+                  : t.Status === 3
+                    ? "HOLD"
+                    : "EMPTY") as TableStatusType,
+            startTime: finalStartTime,
+            lockedByName: t.lockedByName,
+            totalAmount: t.totalAmount,
+            isHoldOvertime: t.isHoldOvertime === 1 || !!t.isHoldOvertime,
+            entryStatus: t.entryStatus ?? undefined,
+            paymentStatus: t.paymentStatus ?? 0,
+            customerName: t.customerName ?? undefined,
+            pax: t.pax ?? undefined,
+          };
+        });
+        useTableStatusStore.getState().batchUpdateTableStatus(updates);
+      }
+    } catch (_) {}
+
+    // ⚡ 2. FAST BACKGROUND SERVER REFRESH (3.5s timeout, no long blocking freezes)
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
       const response = await fetch(`${API_URL}/api/tables/all`, {
         signal: controller.signal,
         headers: { Accept: "application/json" },
@@ -1098,14 +1251,13 @@ export default function Category() {
             index === self.findIndex((t) => t.id === item.id),
         );
 
-        setAllTables((prev) => {
-          if (prev.length !== uniqueTables.length) return uniqueTables;
-          const isSame = prev.every(
-            (t, i) =>
-              t.id === uniqueTables[i].id && t.label === uniqueTables[i].label,
-          );
-          return isSame ? prev : uniqueTables;
-        });
+        setAllTables(uniqueTables);
+
+        // 💾 Persist to local SQLite so tables remain permanently in phone storage
+        try {
+          const { TableRepository } = require("../../db/TableRepository");
+          TableRepository.saveTables(uniqueTables).catch(() => {});
+        } catch (_) {}
 
         // 🚀 BATCH SYNC to global store (MUCH FASTER)
         const updates = uniqueTables.map((t) => {
@@ -1142,16 +1294,10 @@ export default function Category() {
         });
 
         useTableStatusStore.getState().batchUpdateTableStatus(updates);
-      } else {
-        throw new Error("No tables returned from API");
       }
     } catch (error) {
-      Alert.alert(
-        "Connection Error",
-        `Failed to connect to server at ${API_URL}\n\nPlease ensure the backend server is running.`,
-        [{ text: "OK" }],
-      );
-      setAllTables([]);
+      console.log("ℹ️ [Tables] Offline mode active: using cached local tables without interruption.");
+      // 🛡️ CRITICAL: NEVER wipe out tables (setAllTables([])) and NEVER show blocking modal when offline!
     } finally {
       setLoading(false);
     }
@@ -2952,7 +3098,7 @@ export default function Category() {
       >
         <View style={[styles.menuOverlay, { justifyContent: "center", alignItems: "center" }]}>
           <TouchableOpacity
-            style={StyleSheet.absoluteFillObject}
+            style={StyleSheet.absoluteFill}
             activeOpacity={1}
             onPress={() => setIsQRModalVisible(false)}
           />
@@ -3031,7 +3177,7 @@ export default function Category() {
       >
         <View style={styles.menuOverlay}>
           <TouchableOpacity
-            style={StyleSheet.absoluteFillObject}
+            style={StyleSheet.absoluteFill}
             activeOpacity={1}
             onPress={() => setIsMenuVisible(false)}
           />

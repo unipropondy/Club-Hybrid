@@ -1572,7 +1572,10 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
     // 4. Handle Server Save in the background
     (async () => {
       try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
         const sendRes = await fetch(`${API_URL}/api/orders/send`, {
+          signal: controller.signal,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1599,6 +1602,7 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
             }),
           }),
         });
+        clearTimeout(timeoutId);
 
         const sendData = await sendRes.json();
         if (sendData.success) {
@@ -1675,7 +1679,22 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
               kds_status: "PENDING",
             }))
           );
-          console.log(`💾 [CartSidebar] Saved order ${currentOrderId} locally into SQLite!`);
+          console.log(`💾 [CartSidebar] Saved order ${generatedOrderNo} locally into SQLite!`);
+
+          // Update local table repository to Occupied (Status: 1)
+          if (orderContext.tableId) {
+            try {
+              const { TableRepository } = require("../db/TableRepository");
+              TableRepository.updateTableStatus(
+                orderContext.tableId,
+                1,
+                payableAmount,
+                generatedOrderNo,
+                (orderContext as any)?.customerName || null
+              ).catch(() => {});
+            } catch (_) {}
+          }
+
           showToast({
             type: "warning",
             message: "Offline Order Saved",

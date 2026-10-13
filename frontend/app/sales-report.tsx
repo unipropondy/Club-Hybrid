@@ -3,7 +3,7 @@ import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { format } from "date-fns";
 import { BlurView } from "expo-blur";
-import * as FileSystemLegacy from "expo-file-system";
+import * as FileSystemLegacy from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
 import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -394,13 +394,24 @@ export default function SalesReport() {
       ? `${API_URL}/api/credit-customers/search?query=${encodeURIComponent(q)}`
       : `${API_URL}/api/members/search?query=${encodeURIComponent(q)}`;
     try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 2500);
       const res = await fetch(endpoint, {
+        signal: ctrl.signal,
         headers: useAuthStore.getState().token ? { Authorization: `Bearer ${useAuthStore.getState().token}` } : {},
       });
+      clearTimeout(timer);
       const data = await res.json();
       setMembersList(Array.isArray(data) ? data : []);
     } catch (err) {
-      console.error("Search members error:", err);
+      console.log("ℹ️ [SalesReport] Offline: searching members from local SQLite...");
+      try {
+        const { MemberRepository } = require("../db/MemberRepository");
+        const localMembers = await MemberRepository.searchOffline(q, isCredit);
+        setMembersList(localMembers || []);
+      } catch (_) {
+        setMembersList([]);
+      }
     } finally {
       setSearchingMembers(false);
     }
@@ -827,9 +838,13 @@ export default function SalesReport() {
         endStr = rangeEnd;
       }
 
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3500);
       const response = await fetch(`${API_URL}/api/sales/all?startDate=${startStr}&endDate=${endStr}`, {
+        signal: ctrl.signal,
         headers: { "Content-Type": "application/json" },
       });
+      clearTimeout(timer);
       if (!response.ok) throw new Error("Failed to fetch sales");
       const data = await response.json();
       if (Array.isArray(data)) {
@@ -838,7 +853,29 @@ export default function SalesReport() {
         setSales([]);
       }
     } catch (error) {
-      console.error("Sales fetch error:", error);
+      console.log("ℹ️ [SalesReport] Offline: restoring local sales from SQLite...");
+      try {
+        const { OrderRepository } = require("../db/OrderRepository");
+        const localSummary = await OrderRepository.getDailySalesSummary(selectedDate);
+        if (localSummary && localSummary.recentBills && localSummary.recentBills.length > 0) {
+          const mapped = localSummary.recentBills.map((b: any) => ({
+            BillNo: b.order_number,
+            OrderNumber: b.order_number,
+            TableNo: b.table_no,
+            SysAmount: b.total_amount,
+            SubTotal: b.subtotal,
+            TaxAmount: b.tax_amount,
+            DiscountAmount: b.discount_amount,
+            PayMode: b.payment_method || "CASH",
+            CreatedOn: b.created_at,
+            CustomerName: b.customer_name,
+            waiter_name: b.waiter_name,
+            isOffline: true,
+          }));
+          setSales(mapped);
+          return;
+        }
+      } catch (_) {}
       setSales([]);
     }
   };
@@ -874,12 +911,32 @@ export default function SalesReport() {
         startStr = rangeStart;
         endStr = rangeEnd;
       }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3500);
       const url = `${API_URL}/api/sales/range?startDate=${startStr}&endDate=${endStr}`;
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(timer);
       const data = await response.json();
       setSummary(Array.isArray(data) ? data[0] : data);
     } catch (error) {
-      console.error("Summary fetch error:", error);
+      console.log("ℹ️ [SalesReport] Offline: restoring summary from local SQLite...");
+      try {
+        const { OrderRepository } = require("../db/OrderRepository");
+        const localSummary = await OrderRepository.getDailySalesSummary(selectedDate);
+        if (localSummary && localSummary.totalBills > 0) {
+          setSummary({
+            totalSales: localSummary.totalSales,
+            totalBills: localSummary.totalBills,
+            cashTotal: localSummary.cashTotal,
+            cardTotal: localSummary.cardTotal,
+            upiTotal: localSummary.upiTotal,
+            discountTotal: localSummary.discountTotal,
+            taxTotal: localSummary.taxTotal,
+            isOffline: true,
+          });
+          return;
+        }
+      } catch (_) {}
       setSummary(null);
     }
   };

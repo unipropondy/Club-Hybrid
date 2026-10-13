@@ -104,12 +104,28 @@ export const usePaymentSettingsStore = create<PaymentSettingsState>()(
       fetchPaymentMethods: async () => {
         const currentStore = usePaymentSettingsStore.getState();
         const now = Date.now();
-        if (currentStore.lastFetchedMethods && (now - currentStore.lastFetchedMethods < 300000)) {
+        if (currentStore.lastFetchedMethods && (now - currentStore.lastFetchedMethods < 300000) && currentStore.paymentMethods.length > 0) {
           return;
         }
+
+        // Try local SQLite first if paymentMethods is empty
+        if (!currentStore.paymentMethods || currentStore.paymentMethods.length === 0) {
+          try {
+            const { PaymodeRepository } = require('../../../../db/PaymodeRepository');
+            const cachedPm = await PaymodeRepository.getCachedPaymodes();
+            if (cachedPm && cachedPm.length > 0) {
+              set({ paymentMethods: cachedPm, hasLoadedMethods: true });
+            }
+          } catch (_) {}
+        }
+
         try {
-          const res = await fetch(`${API_URL}/api/sales/payment-methods`);
-          if (!res.ok) return;
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 3500);
+          const res = await fetch(`${API_URL}/api/sales/payment-methods`, { signal: ctrl.signal });
+          clearTimeout(timer);
+
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data: any[] = await res.json();
           const mapped: CachedPaymentMethod[] = data.map((d) => ({
             payMode: d.payMode || '',
@@ -124,9 +140,23 @@ export const usePaymentSettingsStore = create<PaymentSettingsState>()(
             deviceSn: d.DeviceSN || null,
             deviceSalt: d.DeviceSalt || null,
           }));
+
           set({ paymentMethods: mapped, hasLoadedMethods: true, lastFetchedMethods: now });
+
+          // Persist to local SQLite
+          try {
+            const { PaymodeRepository } = require('../../../../db/PaymodeRepository');
+            PaymodeRepository.savePaymodes(mapped).catch(() => {});
+          } catch (_) {}
         } catch (error) {
-          console.error('❌ [PaymentSettingsStore] fetchPaymentMethods Error:', error);
+          console.log('ℹ️ [PaymentSettingsStore] Offline: using local SQLite paymode cache.');
+          try {
+            const { PaymodeRepository } = require('../../../../db/PaymodeRepository');
+            const cachedPm = await PaymodeRepository.getCachedPaymodes();
+            if (cachedPm && cachedPm.length > 0) {
+              set({ paymentMethods: cachedPm, hasLoadedMethods: true });
+            }
+          } catch (_) {}
         }
       },
 

@@ -3,4 +3,8 @@ export * from './schema';
 export * from './database';
 export * from './OrderRepository';
 export * from './MenuRepository';
+export * from './TableRepository';
+export * from './PaymodeRepository';
+export * from './MemberRepository';
+export * from './SettingsRepository';
 export * from './SyncQueueRepository';

@@ -374,7 +374,10 @@ const storeCreator: StateCreator<
       
       set({ isFetching: true });
       try {
-        const res = await fetch(`${API_URL}/api/orders/active-kitchen`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
+        const res = await fetch(`${API_URL}/api/orders/active-kitchen`, { signal: controller.signal });
+        clearTimeout(timeoutId);
         if (!res.ok) throw new Error("Failed to fetch active kitchen orders");
         const result = await res.json();
         const ordersFromApi = result.orders || (Array.isArray(result) ? result : []);
@@ -435,11 +438,14 @@ const storeCreator: StateCreator<
         });
 
         // 🚀 SERVER IS TRUTH: If an order is gone from the server, it should be gone from the KDS
-        // We only keep local orders if they are REALLY new (not yet synced to DB)
+        // We keep local orders if they are REALLY new or offline created (TEMP-, OFF-, W-, #NEW)
         const merged = [...updatedApiOrders];
         currentOrders.forEach(local => {
-          // Only keep local orders that have never reached the server (TEMP- IDs or #NEW)
-          const isUnsynced = local.orderId.startsWith('TEMP-') || local.orderId === 'NEW' || local.orderId === '#NEW';
+          const isUnsynced = local.orderId.startsWith('TEMP-') || 
+            local.orderId.startsWith('OFF-') || 
+            local.orderId.startsWith('W-') || 
+            local.orderId === 'NEW' || 
+            local.orderId === '#NEW';
           if (isUnsynced && !merged.find(m => m.orderId === local.orderId)) {
             merged.push(local);
           }

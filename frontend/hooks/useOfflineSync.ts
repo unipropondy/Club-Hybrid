@@ -1,5 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { OrderRepository, MenuRepository, SyncQueueRepository } from '../db';
+import {
+  OrderRepository,
+  MenuRepository,
+  TableRepository,
+  PaymodeRepository,
+  MemberRepository,
+  SettingsRepository,
+  SyncQueueRepository,
+} from '../db';
 import { useOfflineSyncStore } from '../stores/offlineSyncStore';
 import axios from 'axios';
 
@@ -72,14 +80,51 @@ export function useOfflineSync(backendUrl: string) {
   }, [cleanUrl]);
 
   /**
-   * Pull updated menu dishes from central MSSQL server into local SQLite cache
+   * Pull updated master data (dishes, tables, paymodes, members, credit, settings) from server into local SQLite cache
    */
-  const pullMenuData = useCallback(async (): Promise<void> => {
+  const pullMasterData = useCallback(async (): Promise<void> => {
     if (!cleanUrl) return;
-    const response = await axios.get(`${cleanUrl}/api/sync/pull`, { timeout: 15000 });
-    if (response.data?.success && Array.isArray(response.data.dishes)) {
-      await MenuRepository.saveMenuDishes(response.data.dishes);
-      console.log(`[OfflineSync] Pull successful! Cached ${response.data.dishes.length} menu items locally.`);
+    try {
+      const response = await axios.get(`${cleanUrl}/api/sync/pull`, { timeout: 15000 });
+      if (response.data?.success) {
+        // 1. Save Dishes
+        if (Array.isArray(response.data.dishes) && response.data.dishes.length > 0) {
+          await MenuRepository.saveMenuDishes(response.data.dishes);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.dishes.length} dishes locally.`);
+        }
+        // 2. Save Tables
+        if (Array.isArray(response.data.tables) && response.data.tables.length > 0) {
+          await TableRepository.saveTables(response.data.tables);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.tables.length} tables locally.`);
+        }
+        // 3. Save Payment Modes
+        if (Array.isArray(response.data.paymodes) && response.data.paymodes.length > 0) {
+          await PaymodeRepository.savePaymodes(response.data.paymodes);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.paymodes.length} paymodes locally.`);
+        }
+        // 4. Save Members
+        if (Array.isArray(response.data.members) && response.data.members.length > 0) {
+          await MemberRepository.saveMembers(response.data.members);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.members.length} members locally.`);
+        }
+        // 5. Save Credit Customers
+        if (Array.isArray(response.data.credit_customers) && response.data.credit_customers.length > 0) {
+          await MemberRepository.saveCreditCustomers(response.data.credit_customers);
+          console.log(`[OfflineSync] Pull successful! Cached ${response.data.credit_customers.length} credit customers locally.`);
+        }
+        // 6. Save Company Settings
+        if (response.data.company_settings) {
+          await SettingsRepository.saveCompanySettings(response.data.company_settings);
+          console.log(`[OfflineSync] Pull successful! Cached company settings locally.`);
+        }
+        // 7. Save General Settings
+        if (response.data.general_settings) {
+          await SettingsRepository.saveGeneralSettings(response.data.general_settings);
+          console.log(`[OfflineSync] Pull successful! Cached general settings locally.`);
+        }
+      }
+    } catch (err: any) {
+      console.warn('[OfflineSync] Master data pull warning:', err.message);
     }
   }, [cleanUrl]);
 
@@ -96,8 +141,8 @@ export function useOfflineSync(backendUrl: string) {
       // 1. Push local changes up to cloud
       const syncedCount = await pushLocalOrders();
 
-      // 2. Pull master menu down from cloud
-      await pullMenuData();
+      // 2. Pull master data (dishes, tables, paymodes) down from cloud
+      await pullMasterData();
 
       const now = new Date().toLocaleTimeString();
       updateState({
@@ -124,7 +169,7 @@ export function useOfflineSync(backendUrl: string) {
     } finally {
       isSyncingRef.current = false;
     }
-  }, [cleanUrl, pushLocalOrders, pullMenuData, refreshQueueCount, updateState]);
+  }, [cleanUrl, pushLocalOrders, pullMasterData, refreshQueueCount, updateState]);
 
   // Automated 20-minute background interval + 30-second retry loop
   useEffect(() => {

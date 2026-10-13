@@ -73,4 +73,140 @@ CREATE TABLE IF NOT EXISTS app_settings_cache (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tables_cache (
+  table_id TEXT PRIMARY KEY NOT NULL,
+  table_number TEXT NOT NULL,
+  dining_section INTEGER NOT NULL DEFAULT 1,
+  status INTEGER NOT NULL DEFAULT 0,
+  start_time TEXT,
+  locked_by_name TEXT,
+  total_amount REAL NOT NULL DEFAULT 0,
+  current_order_id TEXT,
+  is_overtime INTEGER NOT NULL DEFAULT 0,
+  is_hold_overtime INTEGER NOT NULL DEFAULT 0,
+  entry_status TEXT,
+  payment_status INTEGER NOT NULL DEFAULT 0,
+  customer_name TEXT,
+  pax INTEGER,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tables_section ON tables_cache(dining_section);
+CREATE INDEX IF NOT EXISTS idx_tables_status ON tables_cache(status);
+
+CREATE TABLE IF NOT EXISTS paymodes_cache (
+  pay_mode TEXT PRIMARY KEY NOT NULL,
+  description TEXT,
+  position INTEGER DEFAULT 0,
+  is_active INTEGER DEFAULT 1,
+  commission REAL DEFAULT 0,
+  service_charge REAL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sales_summary_cache (
+  summary_date TEXT PRIMARY KEY NOT NULL,
+  total_sales REAL NOT NULL DEFAULT 0,
+  total_bills INTEGER NOT NULL DEFAULT 0,
+  cash_total REAL NOT NULL DEFAULT 0,
+  card_total REAL NOT NULL DEFAULT 0,
+  upi_total REAL NOT NULL DEFAULT 0,
+  other_total REAL NOT NULL DEFAULT 0,
+  tax_total REAL NOT NULL DEFAULT 0,
+  discount_total REAL NOT NULL DEFAULT 0,
+  raw_breakdown TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS members_cache (
+  member_id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  phone TEXT,
+  email TEXT,
+  address TEXT,
+  credit_limit REAL DEFAULT 0,
+  current_balance REAL DEFAULT 0,
+  balance REAL DEFAULT 0,
+  is_active INTEGER DEFAULT 1,
+  is_vip INTEGER DEFAULT 0,
+  vip_type TEXT,
+  reward_credit REAL DEFAULT 0,
+  promo_code TEXT,
+  promo_amount REAL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_members_phone ON members_cache(phone);
+CREATE INDEX IF NOT EXISTS idx_members_name ON members_cache(name);
+
+CREATE TABLE IF NOT EXISTS credit_customers_cache (
+  customer_id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  phone TEXT,
+  email TEXT,
+  address TEXT,
+  credit_limit REAL DEFAULT 0,
+  current_balance REAL DEFAULT 0,
+  is_active INTEGER DEFAULT 1,
+  customer_type TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_cust_phone ON credit_customers_cache(phone);
+CREATE INDEX IF NOT EXISTS idx_credit_cust_name ON credit_customers_cache(name);
+
+CREATE TABLE IF NOT EXISTS modifiers_cache (
+  modifier_id TEXT PRIMARY KEY NOT NULL,
+  dish_id TEXT NOT NULL,
+  group_id TEXT,
+  modifier_code TEXT,
+  modifier_name TEXT NOT NULL,
+  price REAL DEFAULT 0,
+  is_open_modifier INTEGER DEFAULT 0,
+  sort_code INTEGER DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_modifiers_dish ON modifiers_cache(dish_id);
+CREATE INDEX IF NOT EXISTS idx_modifiers_group ON modifiers_cache(group_id);
+
+CREATE TABLE IF NOT EXISTS combo_cache (
+  combo_id TEXT PRIMARY KEY NOT NULL,
+  dish_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  base_price REAL DEFAULT 0,
+  raw_config TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_combo_dish ON combo_cache(dish_id);
+
+CREATE TABLE IF NOT EXISTS company_settings_cache (
+  id TEXT PRIMARY KEY NOT NULL DEFAULT '1',
+  company_name TEXT,
+  address TEXT,
+  phone TEXT,
+  email TEXT,
+  gst_no TEXT,
+  gst_percentage REAL DEFAULT 0,
+  tax_mode TEXT DEFAULT 'exclusive',
+  service_charge_percentage REAL DEFAULT 0,
+  takeaway_charges REAL DEFAULT 0,
+  currency TEXT DEFAULT 'SGD',
+  currency_symbol TEXT DEFAULT '$',
+  company_logo_url TEXT,
+  halal_logo_url TEXT,
+  show_company_logo INTEGER DEFAULT 0,
+  show_halal_logo INTEGER DEFAULT 0,
+  hold_overtime_minutes INTEGER DEFAULT 30,
+  raw_json TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS general_settings_cache (
+  setting_key TEXT PRIMARY KEY NOT NULL,
+  setting_value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;

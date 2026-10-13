@@ -192,25 +192,49 @@ router.post("/push", async (req, res) => {
               @userId, GETDATE(), CAST(GETDATE() AS DATE), @payMode, @startDate
             );
 
-            INSERT INTO PaymentDetailCur (
-              RestaurantBillId, Paymode, Amount, start_date, CreatedOn
-            ) VALUES (
-              @sid, 1, @total, @startDate, GETDATE()
-            );
-
-            INSERT INTO PaymentDetail (
-              RestaurantBillId, Paymode, Amount, start_date, CreatedOn, isUploadHQ
-            ) VALUES (
-              @sid, 1, @total, @startDate, GETDATE(), 0
-            );
-
-            INSERT INTO SettlementTotalSales (
-              SettlementID, PayMode, SysAmount, ManualAmount, ReceiptCount, start_date
-            ) VALUES (
-              @sid, @payMode, @total, @total, 1, @startDate
-            );
           END
         `).catch(sErr => console.warn("SettlementHeader insert warning:", sErr.message));
+
+        // Insert payment details (Supports Split Payments e.g. Cash + Card)
+        const paymentList = (Array.isArray(rawPayload.payments) && rawPayload.payments.length > 0)
+          ? rawPayload.payments
+          : [{ payMode, amount: totalAmt }];
+
+        for (const p of paymentList) {
+          const pMode = String(p.payMode || p.payModeName || payMode || "CASH").toUpperCase();
+          const pAmt = parseFloat(p.amount) || totalAmt;
+
+          await transaction.request()
+            .input("sid", sql.UniqueIdentifier, orderGuid)
+            .input("payMode", sql.VarChar(50), pMode)
+            .input("amount", sql.Decimal(18, 2), pAmt)
+            .input("startDate", sql.Date, activeStartDate)
+            .query(`
+              DECLARE @pPos INT = 1;
+              SELECT TOP 1 @pPos = Position FROM Paymode WITH (NOLOCK) 
+              WHERE UPPER(LTRIM(RTRIM(PayMode))) = UPPER(LTRIM(RTRIM(@payMode))) 
+                 OR UPPER(LTRIM(RTRIM(Description))) = UPPER(LTRIM(RTRIM(@payMode)));
+              IF @pPos IS NULL SET @pPos = 1;
+
+              INSERT INTO PaymentDetailCur (
+                PaymentId, RestaurantBillId, Paymode, Amount, start_date, CreatedOn
+              ) VALUES (
+                NEWID(), @sid, @pPos, @amount, @startDate, GETDATE()
+              );
+
+              INSERT INTO PaymentDetail (
+                PaymentId, RestaurantBillId, SettlementId, InvoiceId, OrderId, Paymode, Amount, start_date, CreatedOn, isUploadHQ, isSettlement
+              ) VALUES (
+                NEWID(), @sid, @sid, @sid, @sid, @pPos, @amount, @startDate, GETDATE(), 0, 1
+              );
+
+              INSERT INTO SettlementTotalSales (
+                SettlementID, PayMode, SysAmount, ManualAmount, ReceiptCount, start_date
+              ) VALUES (
+                @sid, @payMode, @amount, @amount, 1, @startDate
+              );
+            `).catch(pErr => console.warn("Payment detail insert warning:", pErr.message));
+        }
       }
 
       // 3. Insert Order Items into RestaurantOrderDetailCur
@@ -259,24 +283,74 @@ router.post("/push", async (req, res) => {
             )
           `);
 
-          // Insert into SettlementItemDetail if offline settled
+          // Insert into SettlementItemDetail and RestaurantOrderDetail if offline settled
           if (isPaid) {
             const sItemReq = new sql.Request(transaction);
             sItemReq.input("sid", sql.UniqueIdentifier, orderGuid);
+            sItemReq.input("detailId", sql.UniqueIdentifier, detailGuid);
             sItemReq.input("dishId", sql.UniqueIdentifier, dishGuid);
+            sItemReq.input("dishName", sql.NVarChar(150), safeDishName);
             sItemReq.input("qty", sql.Decimal(18, 2), qty);
             sItemReq.input("rate", sql.Decimal(18, 2), unitPrice);
             sItemReq.input("amt", sql.Decimal(18, 2), totalPrice);
+            sItemReq.input("bizId", sql.UniqueIdentifier, defaultBizId);
+            sItemReq.input("userId", sql.UniqueIdentifier, safeUserId);
             sItemReq.input("startDate", sql.Date, activeStartDate);
             await sItemReq.query(`
+              DECLARE @cId UNIQUEIDENTIFIER = NULL;
+              DECLARE @cName NVARCHAR(100) = NULL;
+              DECLARE @gName NVARCHAR(100) = NULL;
+              SELECT TOP 1 @cId = dg.CategoryId, @cName = cm.CategoryName, @gName = dg.DishGroupName
+              FROM DishMaster d WITH (NOLOCK)
+              LEFT JOIN DishGroupMaster dg WITH (NOLOCK) ON d.DishGroupId = dg.DishGroupId
+              LEFT JOIN CategoryMaster cm WITH (NOLOCK) ON dg.CategoryId = cm.CategoryId
+              WHERE d.DishId = @dishId;
+
               INSERT INTO SettlementItemDetail (
-                SettlementID, DishId, Quantity, Rate, ItemAmount, start_date
+                SettlementID, DishId, DishName, SongName, Qty, Price, Status, OrderDateTime,
+                CategoryId, CategoryName, SubCategoryName, start_date
               ) VALUES (
-                @sid, @dishId, @qty, @rate, @amt, @startDate
-              )
-            `).catch(iErr => console.warn("SettlementItemDetail insert warning:", iErr.message));
+                @sid, @dishId, @dishName, '', @qty, @rate, 'NORMAL', GETDATE(),
+                @cId, @cName, @gName, @startDate
+              );
+
+              INSERT INTO RestaurantOrderDetail (
+                OrderDetailId, OrderId, DishId, Description, DishName, Quantity, PricePerUnit,
+                ActualAmount, TotalDetailLineAmount, BaseAmount, StatusCode, CreatedBy, CreatedOn,
+                BusinessUnitId, OrderDateTime, start_date
+              ) VALUES (
+                @detailId, @sid, @dishId, @dishName, @dishName, @qty, @rate,
+                @amt, @amt, @amt, 1, @userId, GETDATE(),
+                @bizId, GETDATE(), @startDate
+              );
+            `).catch(iErr => console.warn("SettlementItemDetail/RestaurantOrderDetail insert warning:", iErr.message));
           }
         }
+      }
+
+      // Archive order header to RestaurantOrder if paid
+      if (isPaid) {
+        await transaction.request()
+          .input("orderId", sql.UniqueIdentifier, orderGuid)
+          .input("orderNo", sql.VarChar(20), safeOrderNo)
+          .input("tableNo", sql.VarChar(10), safeTableNo)
+          .input("total", sql.Decimal(18, 2), parseFloat(order.total_amount) || 0)
+          .input("bizId", sql.UniqueIdentifier, defaultBizId)
+          .input("userId", sql.UniqueIdentifier, safeUserId)
+          .input("startDate", sql.Date, activeStartDate)
+          .input("createdAt", sql.DateTime, order.created_at ? new Date(order.created_at) : new Date())
+          .query(`
+            IF NOT EXISTS (SELECT 1 FROM RestaurantOrder WHERE OrderId = @orderId OR OrderNumber = @orderNo)
+            BEGIN
+              INSERT INTO RestaurantOrder (
+                OrderId, OrderNumber, OrderDateTime, Tableno, StatusCode, CreatedBy, CreatedOn,
+                BusinessUnitId, isOrderClosed, PriorityCode, TotalLineItemAmount, TotalAmount, start_date
+              ) VALUES (
+                @orderId, @orderNo, @createdAt, @tableNo, 3, @userId, GETDATE(),
+                @bizId, 1, 1, @total, @total, @startDate
+              );
+            END
+          `).catch(roErr => console.warn("RestaurantOrder archive warning:", roErr.message));
       }
 
       syncedClientIds.push(clientId);
@@ -332,9 +406,9 @@ router.get("/pull", async (req, res) => {
 
   try {
     const pool = await poolPromise;
-    const request = pool.request();
 
-    let query = `
+    // 1. Fetch Dishes
+    let dishQuery = `
       SELECT 
         d.DishId as dish_id,
         d.Name as dish_name,
@@ -348,19 +422,132 @@ router.get("/pull", async (req, res) => {
       LEFT JOIN DishGroupMaster g WITH (NOLOCK) ON d.DishGroupId = g.DishGroupId
     `;
 
+    const dishReq = pool.request();
     if (since) {
-      request.input("sinceDate", sql.VarChar, since);
-      query += ` WHERE d.ModifiedOn >= @sinceDate OR d.CreatedOn >= @sinceDate`;
+      dishReq.input("sinceDate", sql.VarChar, since);
+      dishQuery += ` WHERE d.ModifiedOn >= @sinceDate OR d.CreatedOn >= @sinceDate`;
+    }
+    dishQuery += ` ORDER BY g.DishGroupName, d.Name`;
+
+    const dishResult = await dishReq.query(dishQuery);
+
+    // 2. Fetch Tables
+    let tablesData = [];
+    try {
+      const tableRes = await pool.request().query(`
+        SELECT 
+          TableId AS id, 
+          CAST(TableNumber AS VARCHAR(50)) AS label,
+          CAST(DiningSection AS VARCHAR(10)) AS DiningSection, 
+          LockedByName as lockedByName,
+          Status, 
+          CONVERT(VARCHAR, StartTime, 126) as StartTime, 
+          ISNULL(TotalAmount, 0) as totalAmount, 
+          CurrentOrderId as currentOrderId,
+          entry_status AS entryStatus, 
+          ISNULL(PAYMENT_STATUS, 0) AS paymentStatus, 
+          CustomerName as customerName, 
+          Pax as pax
+        FROM TableMaster WITH (NOLOCK)
+        ORDER BY SortCode, TableNumber
+      `);
+      tablesData = tableRes.recordset || [];
+    } catch (tblErr) {
+      console.warn("⚠️ [TabletSync Pull] Tables fetch warning:", tblErr.message);
     }
 
-    query += ` ORDER BY g.DishGroupName, d.Name`;
+    // 3. Fetch Payment Modes
+    let paymodesData = [];
+    try {
+      const pmRes = await pool.request().query(`
+        SELECT 
+          PayMode as payMode,
+          ISNULL(Description, PayMode) as description,
+          Position as position,
+          1 as active
+        FROM Paymode WITH (NOLOCK)
+        ORDER BY Position
+      `);
+      paymodesData = pmRes.recordset || [];
+    } catch (pmErr) {
+      console.warn("⚠️ [TabletSync Pull] Paymode fetch warning:", pmErr.message);
+    }
 
-    const result = await request.query(query);
+    // 4. Fetch Active Members
+    let membersData = [];
+    try {
+      const memRes = await pool.request().query(`
+        SELECT 
+          MemberId, Name, Phone, Email, Address,
+          ISNULL(CreditLimit, 0) as CreditLimit,
+          ISNULL(CurrentBalance, 0) as CurrentBalance,
+          ISNULL(Balance, 0) as Balance,
+          CASE WHEN IsActive = 1 THEN 1 ELSE 0 END as IsActive,
+          CASE WHEN IsVIP = 1 THEN 1 ELSE 0 END as IsVIP,
+          VIPType,
+          ISNULL(RewardCredit, 0) as RewardCredit,
+          Promocode,
+          ISNULL(Promoamount, 0) as Promoamount
+        FROM MemberMaster WITH (NOLOCK)
+        WHERE IsActive = 1
+        ORDER BY Name
+      `);
+      membersData = memRes.recordset || [];
+    } catch (memErr) {
+      console.warn("⚠️ [TabletSync Pull] Members fetch warning:", memErr.message);
+    }
+
+    // 5. Fetch Credit Customers
+    let creditCustomersData = [];
+    try {
+      const ccRes = await pool.request().query(`
+        SELECT 
+          CustomerId, Name, Phone, Email, Address,
+          ISNULL(CreditLimit, 0) as CreditLimit,
+          ISNULL(CurrentBalance, 0) as CurrentBalance,
+          CASE WHEN IsActive = 1 THEN 1 ELSE 0 END as IsActive,
+          CustomerType
+        FROM CreditCustomerMaster WITH (NOLOCK)
+        WHERE IsActive = 1
+        ORDER BY Name
+      `);
+      creditCustomersData = ccRes.recordset || [];
+    } catch (ccErr) {
+      console.warn("⚠️ [TabletSync Pull] Credit Customers fetch warning:", ccErr.message);
+    }
+
+    // 6. Fetch Company Settings
+    let companySettingsData = null;
+    try {
+      const csRes = await pool.request().query(`
+        SELECT TOP 1 * FROM CompanySettings WITH (NOLOCK) WHERE Id = '1'
+      `);
+      companySettingsData = csRes.recordset[0] || null;
+    } catch (csErr) {
+      console.warn("⚠️ [TabletSync Pull] Company settings fetch warning:", csErr.message);
+    }
+
+    // 7. Fetch General Settings
+    let generalSettingsData = null;
+    try {
+      const gsRes = await pool.request().query(`
+        SELECT TOP 1 * FROM AppSettings WITH (NOLOCK)
+      `);
+      generalSettingsData = gsRes.recordset[0] || null;
+    } catch (gsErr) {
+      console.warn("⚠️ [TabletSync Pull] App settings fetch warning:", gsErr.message);
+    }
 
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
-      dishes: result.recordset || [],
+      dishes: dishResult.recordset || [],
+      tables: tablesData,
+      paymodes: paymodesData,
+      members: membersData,
+      credit_customers: creditCustomersData,
+      company_settings: companySettingsData,
+      general_settings: generalSettingsData,
     });
   } catch (error) {
     console.error("❌ [TabletSync Pull Error]:", error);

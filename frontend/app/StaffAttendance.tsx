@@ -805,7 +805,7 @@ const styles = StyleSheet.create({
   historyDate: { fontSize: 11, fontFamily: Fonts.medium, color: Theme.textSecondary, marginTop: 2 },
   emptyText: { textAlign: "center", color: Theme.textSecondary, fontSize: 13, fontFamily: Fonts.medium, paddingVertical: 20 },
 
-  loader: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(250,247,242,0.7)", alignItems: "center", justifyContent: "center" },
+  loader: { ...(StyleSheet.absoluteFill as any), backgroundColor: "rgba(250,247,242,0.7)", alignItems: "center", justifyContent: "center" },
 
   modalOverlay: {
     flex: 1,

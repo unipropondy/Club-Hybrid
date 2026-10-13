@@ -98,8 +98,30 @@ export default function DayEndScreen() {
         setData(json);
       }
     } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to fetch summary");
+      console.warn("⚠️ [DayEnd] API fetch failed, falling back to local SQLite summary:", err);
+      try {
+        const { OrderRepository } = require("../db/OrderRepository");
+        const localSummary = await OrderRepository.getDailySalesSummary(dateRange.start);
+        setData({
+          success: true,
+          isOffline: true,
+          summary: {
+            totalSales: localSummary.totalSales,
+            totalBills: localSummary.totalBills,
+            cashTotal: localSummary.cashTotal,
+            cardTotal: localSummary.cardTotal,
+            upiTotal: localSummary.upiTotal,
+            otherTotal: localSummary.otherTotal,
+            taxTotal: localSummary.taxTotal,
+            discountTotal: localSummary.discountTotal,
+          },
+          paymentBreakdown: localSummary.paymodeBreakdown,
+          items: localSummary.itemBreakdown,
+        });
+      } catch (dbErr) {
+        console.error(dbErr);
+        Alert.alert("Error", "Failed to fetch summary");
+      }
     } finally {
       setLoading(false);
     }
@@ -152,6 +174,20 @@ export default function DayEndScreen() {
 
   const executeDayEnd = async () => {
     setLoading(true);
+    // Unsynced offline orders safety guard
+    try {
+      const { OrderRepository } = require("../db/OrderRepository");
+      const unsynced = await OrderRepository.getUnsyncedOrders();
+      if (unsynced && unsynced.length > 0) {
+        setLoading(false);
+        Alert.alert(
+          "Unsynced Offline Orders Detected",
+          `You have ${unsynced.length} order(s) stored locally on this tablet that have not yet uploaded to the cloud. Please connect to Wi-Fi to sync orders before closing the day, so that all offline sales are counted in your Day End closing.`,
+          [{ text: "OK" }]
+        );
+        return;
+      }
+    } catch (_) {}
     try {
       const res = await API.post("/settlement/day-end", {
         username: user?.userName || "admin"

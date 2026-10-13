@@ -72,14 +72,14 @@ export class UniversalPrinterService {
 
   private static generateEscPosCommands(data: PrintReceiptData): string {
     const header = '\x1B\x40\x1B\x61\x01' + `*** RESTAURANT RECEIPT ***\nOrder: #${data.orderNumber}\nTable: ${data.tableNo}\nTime: ${data.printedAt}\n--------------------------------\n`;
-    const body = data.items.map((i) => `${i.quantity}x ${i.dishName.padEnd(20)} $${i.totalAmount.toFixed(2)}`).join('\n');
+    const body = data.items.map((i: any) => `${i.quantity}x ${i.dishName.padEnd(20)} $${(i.totalPrice ?? i.totalAmount ?? 0).toFixed(2)}`).join('\n');
     const footer = `\n--------------------------------\nTotal: $${data.totalAmount.toFixed(2)}\nThank You!\n\n\n\n\x1D\x56\x41\x00`;
     return header + body + footer;
   }
 
   private static generateTextReceipt(data: PrintReceiptData): string {
     return `[C]*** RECEIPT ***\n[C]Order #${data.orderNumber} - Table ${data.tableNo}\n` +
-      data.items.map((i) => `${i.quantity}x ${i.dishName} - $${i.totalAmount}`).join('\n') +
+      data.items.map((i: any) => `${i.quantity}x ${i.dishName} - $${i.totalPrice ?? i.totalAmount ?? 0}`).join('\n') +
       `\n[C]Total: $${data.totalAmount}`;
   }
 }

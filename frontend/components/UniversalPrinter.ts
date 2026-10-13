@@ -502,8 +502,9 @@ class UniversalPrinter {
     if (Platform.OS === "web") {
       try {
         // Try bridge directly — skip pre-flight isBridgeOnline() check which can falsely report offline
-        const text = this.formatKOTThermalText(orderData, "KDS_PRINT");
-        console.log(`📡 [Web Print Bridge] Queueing KDS print`);
+        const colWidth = this.getAutoColWidth(kdsPrinterIp);
+        const text = this.formatKOTThermalText(orderData, "KDS_PRINT", colWidth);
+        console.log(`📡 [Web Print Bridge] Queueing KDS print (${colWidth} cols)`);
         const success = await this.queuePrintJob(4, undefined, text, kdsPrinterIp);
         if (success) {
           await this.logPrintJob(orderData.orderId, orderData.orderNo, "REPRINT");
@@ -585,10 +586,11 @@ class UniversalPrinter {
     if (Platform.OS === "web") {
       try {
         // Try bridge directly — skip pre-flight isBridgeOnline() check which can falsely report offline
-        const text = this.formatKOTThermalText(orderData, type);
+        const colWidth = this.getAutoColWidth(printerIpOverride);
+        const text = this.formatKOTThermalText(orderData, type, colWidth);
         // Map kitchenCode or kitchenTypeValue
         const kitchenTypeValue = orderData.kitchenCode || orderData.KitchenCode || orderData.kitchenTypeValue || orderData.KitchenTypeValue || "0";
-        console.log(`📡 [Web Print Bridge] Queueing KOT to Kitchen type: ${kitchenTypeValue}`);
+        console.log(`📡 [Web Print Bridge] Queueing KOT (${colWidth} cols) to Kitchen type: ${kitchenTypeValue}`);
         const success = await this.queuePrintJob(2, kitchenTypeValue, text);
         if (success) {
           await this.logPrintJob(orderData.orderId, orderData.orderNo, type);
@@ -706,10 +708,11 @@ class UniversalPrinter {
 
         if (isReachable) {
           try {
-            const text = this.formatKOTThermalText(orderData, type);
+            const colWidth = this.getAutoColWidth(targetIp);
+            const text = this.formatKOTThermalText(orderData, type, colWidth);
 
             if (isIp) {
-              console.log(`🌐 KOT WiFi print to: ${targetIp}`);
+              console.log(`🌐 KOT WiFi print to: ${targetIp} (${colWidth} cols)`);
               const printPromise = ThermalPrinter.printTcp({
                 ip: targetIp,
                 port: 9100,
@@ -1112,9 +1115,13 @@ class UniversalPrinter {
     return lines.length > 0 ? lines : [""];
   }
 
-  private static formatKOTThermalText(data: any, type: string): string {
-    const BIG_NAME = 14; // max chars per line for big font item name on 58mm (14 double-width chars = 28 cols <= 32 cols)
-    const MOD_WRAP = 30; // max chars per line for modifier text on 58mm
+  private static formatKOTThermalText(data: any, type: string, colWidth: number = 48): string {
+    const is58 = colWidth <= 32;
+    const effectiveWidth = is58 ? 32 : (colWidth || 48);
+    const itemWrap = is58 ? 26 : (effectiveWidth - 6);
+    const modWrap = is58 ? 22 : (effectiveWidth - 10);
+    const lineDash = "[L]" + "-".repeat(effectiveWidth) + "\n";
+    const lineEq = "[C]" + "=".repeat(effectiveWidth) + "\n";
 
     const title =
       type === "KDS_PRINT"
@@ -1130,20 +1137,21 @@ class UniversalPrinter {
     const orderNo = data.orderNo || data.orderId || "";
     const kitchenName = data.kitchenName || "";
 
-    let text = `[C]<B>${title}</B>\n`;
+    let text = lineEq;
+    text += `[C]<B>${title}</B>\n`;
     const { showBillTime } = useGeneralSettingsStore.getState().settings;
     const displayTime = showBillTime !== false;
     const kotDateStr = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Singapore', day: '2-digit', month: '2-digit', year: '2-digit' }).format(new Date());
     const kotTimeStr = displayTime ? ` ${formatToSingaporeTime(new Date(), { hour: '2-digit', minute: '2-digit', hour12: false })}` : "";
     text += `[C]${kotDateStr}${kotTimeStr}\n`;
-    text += "[L]--------------------------------\n";
+    text += lineDash;
 
     // 🏠 Centered table number
     text += `[C]<B>TABLE: ${tableNo}</B>\n`;
-    text += "[L]--------------------------------\n";
+    text += lineDash;
 
-    text += "[L]QTY  ITEM\n";
-    text += "[L]--------------------------------\n";
+    text += is58 ? "[L]QTY  ITEM\n" : "[L]QTY    ITEM\n";
+    text += lineDash;
 
     // ── Shared per-item formatter ──
     const formatItem = (item: any): string => {
@@ -1151,8 +1159,8 @@ class UniversalPrinter {
       const qtyNum = item.quantity || item.qty || 1;
       const itemName = (item.name || item.DishName || "").replace(/\n/g, " ");
 
-      // Item name: bold, wrap at 30 chars
-      this.wrapTextKOT(itemName, 30).forEach((chunk: string, idx: number) => {
+      // Item name: bold, wrap dynamically based on paper width
+      this.wrapTextKOT(itemName, itemWrap).forEach((chunk: string, idx: number) => {
         if (idx === 0) t += `[L]<B>[${qtyNum}] ${chunk}</B>\n`;
         else           t += `[L]<B>    ${chunk}</B>\n`;
       });
@@ -1165,12 +1173,12 @@ class UniversalPrinter {
       const isTw = !!(item.isTakeaway || item.IsTakeaway || item.isTakeAway || item.IsTakeAway);
       if (isTw) t += `[L]        <B>>> TAKEAWAY <<</B>\n`;
 
-      // Modifiers: bold, 8-space indent, wrap at MOD_WRAP
+      // Modifiers: bold, 8-space indent, wrap at modWrap
       if (item.modifiers && item.modifiers.length > 0) {
         item.modifiers.forEach((m: any) => {
           const modName = (m.ModifierName || m.modifierName || m.name || m.ModifierNameEn || "").trim();
           if (modName) {
-            this.wrapTextKOT(modName, MOD_WRAP).forEach((chunk: string, idx: number) => {
+            this.wrapTextKOT(modName, modWrap).forEach((chunk: string, idx: number) => {
               t += idx === 0 ? `[L]        <B>+ ${chunk}</B>\n` : `[L]          <B>${chunk}</B>\n`;
             });
           }
@@ -1203,7 +1211,12 @@ class UniversalPrinter {
 
       // Note
       const noteText = item.note || item.notes || item.Remarks || item.remarks;
-      if (noteText) t += `[L]    * NOTE: ${noteText}\n`;
+      if (noteText) {
+        const noteWrap = is58 ? 24 : (effectiveWidth - 12);
+        this.wrapTextKOT(String(noteText), noteWrap).forEach((chunk: string, idx: number) => {
+          t += idx === 0 ? `[L]    * NOTE: ${chunk}\n` : `[L]            ${chunk}\n`;
+        });
+      }
 
       return t;
     };
@@ -1218,24 +1231,28 @@ class UniversalPrinter {
 
       for (const [kName, groupItems] of Object.entries(kitchenGroups)) {
         text += `\n[L]<B>${kName}</B>\n`;
-        text += "[L]--------------------------------\n";
+        text += lineDash;
         groupItems.forEach((item: any) => {
           text += formatItem(item);
         });
-        text += "[L]--------------------------------\n";
+        text += lineDash;
       }
     } else {
       items.forEach((item: any) => {
         text += formatItem(item);
-        text += "[L]--------------------------------\n";
+        text += lineDash;
       });
     }
 
-    text += `[L]Order By: ${waiter}\n`;
-    text += `[L]Order #: ${orderNo}\n`;
+    if (effectiveWidth >= 40) {
+      text += this.formatTwoCols(`Order By: ${waiter}`, `Order #: ${orderNo}`, effectiveWidth);
+    } else {
+      text += `[L]Order By: ${waiter}\n`;
+      text += `[L]Order #: ${orderNo}\n`;
+    }
 
     if (kitchenName && kitchenName !== "KDS") {
-      text += "[L]--------------------------------\n";
+      text += lineDash;
       text += `[C]<B>${kitchenName.toUpperCase()}</B>\n`;
     }
 
@@ -1572,6 +1589,21 @@ class UniversalPrinter {
     }
     if (descriptor.includes("80mm") || descriptor.includes("pos-80") || descriptor.includes("pos80") || descriptor.includes("td80") || /\b80\b/.test(descriptor)) {
       return 48;
+    }
+
+    // 2.5 Lookup in cached kitchen printers list
+    if (targetAddress && this.cachedPrinters && Array.isArray(this.cachedPrinters)) {
+      const cleanTarget = targetAddress.trim().toLowerCase();
+      const matched = this.cachedPrinters.find(
+        (p: any) =>
+          (p.PrinterPath && p.PrinterPath.trim().toLowerCase() === cleanTarget) ||
+          (p.PrinterIP && p.PrinterIP.trim().toLowerCase() === cleanTarget),
+      );
+      if (matched) {
+        const mDesc = `${matched.PrinterName || ''} ${matched.PrinterPath || ''}`.toLowerCase();
+        if (mDesc.includes("58mm") || mDesc.includes("pos-58") || mDesc.includes("pos58") || /\b58\b/.test(mDesc)) return 32;
+        if (mDesc.includes("80mm") || mDesc.includes("pos-80") || mDesc.includes("pos80") || mDesc.includes("td80") || /\b80\b/.test(mDesc)) return 48;
+      }
     }
 
     // 3. External printer configured (LAN IP, Bluetooth, or Windows Print Bridge) -> standard POS 80mm

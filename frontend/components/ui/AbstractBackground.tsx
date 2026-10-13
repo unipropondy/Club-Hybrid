@@ -25,7 +25,7 @@ const styles = StyleSheet.create({
     backgroundColor: Theme.primary,
   },
   abstractBg: {
-    ...StyleSheet.absoluteFillObject,
+    ...(StyleSheet.absoluteFill as any),
     overflow: "hidden",
   },
   blob1: {

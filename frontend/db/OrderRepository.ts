@@ -192,4 +192,140 @@ export class OrderRepository {
 
     return { order: orders[0], items };
   }
+
+  /**
+   * Compute comprehensive daily sales summary directly from local SQLite
+   * Works 100% offline on tablet storage without requiring backend/internet.
+   */
+  static async getDailySalesSummary(targetDate?: string): Promise<{
+    date: string;
+    totalSales: number;
+    totalBills: number;
+    cashTotal: number;
+    cardTotal: number;
+    upiTotal: number;
+    otherTotal: number;
+    taxTotal: number;
+    discountTotal: number;
+    paymodeBreakdown: { method: string; count: number; total: number }[];
+    itemBreakdown: { dishName: string; quantity: number; total: number }[];
+    recentBills: LocalOrder[];
+  }> {
+    const filterDate = targetDate || new Date().toISOString().slice(0, 10);
+
+    try {
+      // 1. Overall totals for COMPLETED orders on the date
+      const totalsRow = await executeQuery(
+        `SELECT 
+          COUNT(*) as total_bills,
+          COALESCE(SUM(total_amount), 0) as total_sales,
+          COALESCE(SUM(tax_amount), 0) as total_tax,
+          COALESCE(SUM(discount_amount), 0) as total_discount
+        FROM orders
+        WHERE (status = 'COMPLETED' OR payment_status = 'PAID')
+          AND date(created_at) = date(?)`,
+        [filterDate]
+      );
+
+      const t = totalsRow[0] || {};
+      const totalBills = Number(t.total_bills || 0);
+      const totalSales = Number(t.total_sales || 0);
+      const taxTotal = Number(t.total_tax || 0);
+      const discountTotal = Number(t.total_discount || 0);
+
+      // 2. Paymode breakdown
+      const paymodeRows = await executeQuery(
+        `SELECT 
+          COALESCE(payment_method, 'CASH') as method,
+          COUNT(*) as count,
+          COALESCE(SUM(total_amount), 0) as total
+        FROM orders
+        WHERE (status = 'COMPLETED' OR payment_status = 'PAID')
+          AND date(created_at) = date(?)
+        GROUP BY payment_method`,
+        [filterDate]
+      );
+
+      let cashTotal = 0;
+      let cardTotal = 0;
+      let upiTotal = 0;
+      let otherTotal = 0;
+
+      const paymodeBreakdown = paymodeRows.map((r: any) => {
+        const method = String(r.method || 'CASH').toUpperCase();
+        const total = Number(r.total || 0);
+        const count = Number(r.count || 0);
+
+        if (method.includes('CASH')) cashTotal += total;
+        else if (method.includes('CARD') || method.includes('NETS') || method.includes('VISA')) cardTotal += total;
+        else if (method.includes('QR') || method.includes('UPI') || method.includes('PAYNOW')) upiTotal += total;
+        else otherTotal += total;
+
+        return { method, count, total };
+      });
+
+      // 3. Item-wise breakdown
+      const itemRows = await executeQuery(
+        `SELECT 
+          oi.dish_name as dishName,
+          SUM(oi.quantity) as quantity,
+          SUM(oi.total_price) as total
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.client_id
+        WHERE (o.status = 'COMPLETED' OR o.payment_status = 'PAID')
+          AND date(o.created_at) = date(?)
+        GROUP BY oi.dish_name
+        ORDER BY quantity DESC
+        LIMIT 30`,
+        [filterDate]
+      );
+
+      const itemBreakdown = itemRows.map((r: any) => ({
+        dishName: r.dishName || 'Item',
+        quantity: Number(r.quantity || 0),
+        total: Number(r.total || 0),
+      }));
+
+      // 4. Recent completed bills for reprint/reference
+      const recentBills = (await executeQuery(
+        `SELECT * FROM orders
+        WHERE (status = 'COMPLETED' OR payment_status = 'PAID')
+          AND date(created_at) = date(?)
+        ORDER BY created_at DESC
+        LIMIT 50`,
+        [filterDate]
+      )) as LocalOrder[];
+
+      return {
+        date: filterDate,
+        totalSales,
+        totalBills,
+        cashTotal,
+        cardTotal,
+        upiTotal,
+        otherTotal,
+        taxTotal,
+        discountTotal,
+        paymodeBreakdown,
+        itemBreakdown,
+        recentBills,
+      };
+    } catch (err) {
+      console.error('[OrderRepository] Failed to calculate daily summary:', err);
+      return {
+        date: filterDate,
+        totalSales: 0,
+        totalBills: 0,
+        cashTotal: 0,
+        cardTotal: 0,
+        upiTotal: 0,
+        otherTotal: 0,
+        taxTotal: 0,
+        discountTotal: 0,
+        paymodeBreakdown: [],
+        itemBreakdown: [],
+        recentBills: [],
+      };
+    }
+  }
 }
