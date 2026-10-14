@@ -153,8 +153,27 @@ export default function LockedTablesScreen() {
 
         setAllTables(uniqueTables);
     } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to fetch tables");
+      console.warn("⚠️ [LockedTables] Server offline, loading from local TableRepository SQLite cache:", err);
+      try {
+        const { TableRepository } = require("../db/TableRepository");
+        const cached = await TableRepository.getCachedTables();
+        if (Array.isArray(cached) && cached.length > 0) {
+          const mapped: TableType[] = cached.map((t: any) => ({
+            tableId: t.id,
+            tableNumber: t.label,
+            diningSection: t.DiningSection || 1,
+            status: t.Status || 0,
+            isLocked: t.Status === 5,
+            lockedByName: t.lockedByName,
+          }));
+          setAllTables(mapped);
+          setLockedTables(mapped.filter((t) => t.isLocked));
+        } else {
+          Alert.alert("Notice", "No cached tables found offline yet. Please sync once while online.");
+        }
+      } catch (dbErr) {
+        console.error(dbErr);
+      }
     } finally {
       setLoading(false);
     }

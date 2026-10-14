@@ -9,3 +9,8 @@ export * from './MemberRepository';
 export * from './SettingsRepository';
 export * from './SyncQueueRepository';
 export * from './UserRepository';
+export * from './ComboRepository';
+export * from './ModifierRepository';
+export * from './SettlementRepository';
+export * from './AttendanceRepository';
+export * from './CashDrawerRepository';

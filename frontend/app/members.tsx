@@ -500,7 +500,16 @@ export default function MembersScreen() {
         }
       }
     } catch (err) {
-      console.error("[FETCH ERROR]", err);
+      console.warn("⚠️ [Members] Network fetch failed, falling back to local SQLite members_cache...");
+      try {
+        const { MemberRepository } = require("../db/MemberRepository");
+        const cachedMembers = await MemberRepository.searchOffline("");
+        if (Array.isArray(cachedMembers) && cachedMembers.length > 0) {
+          setMembers(cachedMembers);
+        }
+      } catch (localErr) {
+        console.error("Local members SQLite lookup error:", localErr);
+      }
     } finally {
       setLoading(false);
     }

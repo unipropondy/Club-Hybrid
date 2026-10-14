@@ -254,7 +254,6 @@ router.post('/', authenticateBridge, async (req, res) => {
       printerIp = 'Receipt Printer';
       printerName = 'Receipt Printer';
     }
-    }
 
     const jobId = require('crypto').randomUUID();
 

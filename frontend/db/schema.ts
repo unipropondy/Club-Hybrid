@@ -255,4 +255,168 @@ CREATE TABLE IF NOT EXISTS license_cache (
   raw_json TEXT,
   updated_at TEXT NOT NULL
 );
+
+-- 🧾 Sales Tables Mirrors for 100% Offline Querying & Reporting
+CREATE TABLE IF NOT EXISTS restaurant_invoice (
+  invoice_id TEXT PRIMARY KEY NOT NULL,
+  order_id TEXT NOT NULL,
+  bill_number TEXT NOT NULL,
+  total_line_item_amount REAL NOT NULL DEFAULT 0,
+  total_tax REAL NOT NULL DEFAULT 0,
+  discount_amount REAL NOT NULL DEFAULT 0,
+  total_amount REAL NOT NULL DEFAULT 0,
+  payment_term_code TEXT,
+  invoice_date TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  status_code INTEGER DEFAULT 5,
+  created_by TEXT,
+  created_on TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_inv_billno ON restaurant_invoice(bill_number);
+CREATE INDEX IF NOT EXISTS idx_inv_startdate ON restaurant_invoice(start_date);
+
+CREATE TABLE IF NOT EXISTS restaurant_order (
+  order_id TEXT PRIMARY KEY NOT NULL,
+  order_number TEXT NOT NULL,
+  table_no TEXT NOT NULL,
+  customer_name TEXT,
+  total_amount REAL NOT NULL DEFAULT 0,
+  total_line_item_amount REAL NOT NULL DEFAULT 0,
+  status_code INTEGER DEFAULT 3,
+  is_order_closed INTEGER DEFAULT 1,
+  start_date TEXT NOT NULL,
+  created_by TEXT,
+  created_on TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ro_order_no ON restaurant_order(order_number);
+CREATE INDEX IF NOT EXISTS idx_ro_start_date ON restaurant_order(start_date);
+
+CREATE TABLE IF NOT EXISTS restaurant_order_detail_cur (
+  order_detail_id TEXT PRIMARY KEY NOT NULL,
+  order_id TEXT NOT NULL,
+  dish_id TEXT NOT NULL,
+  dish_name TEXT NOT NULL,
+  quantity REAL NOT NULL DEFAULT 1,
+  price_per_unit REAL NOT NULL DEFAULT 0,
+  actual_amount REAL NOT NULL DEFAULT 0,
+  status_code INTEGER DEFAULT 1,
+  is_void INTEGER DEFAULT 0,
+  category_id TEXT,
+  category_name TEXT,
+  sub_category_name TEXT,
+  combo_details_json TEXT,
+  modifiers_json TEXT,
+  start_date TEXT NOT NULL,
+  created_on TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rodc_order_id ON restaurant_order_detail_cur(order_id);
+CREATE INDEX IF NOT EXISTS idx_rodc_start_date ON restaurant_order_detail_cur(start_date);
+
+CREATE TABLE IF NOT EXISTS settlement_header (
+  settlement_id TEXT PRIMARY KEY NOT NULL,
+  bill_no TEXT NOT NULL,
+  subtotal REAL NOT NULL DEFAULT 0,
+  total_tax REAL NOT NULL DEFAULT 0,
+  discount_amount REAL NOT NULL DEFAULT 0,
+  sys_amount REAL NOT NULL DEFAULT 0,
+  manual_amount REAL NOT NULL DEFAULT 0,
+  table_no TEXT,
+  order_type TEXT DEFAULT 'DINE-IN',
+  section TEXT DEFAULT 'MAIN',
+  pay_mode TEXT NOT NULL DEFAULT 'CASH',
+  server_name TEXT,
+  is_cancelled INTEGER DEFAULT 0,
+  cancellation_reason TEXT,
+  start_date TEXT NOT NULL,
+  created_by TEXT,
+  created_on TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sh_bill_no ON settlement_header(bill_no);
+CREATE INDEX IF NOT EXISTS idx_sh_start_date ON settlement_header(start_date);
+CREATE INDEX IF NOT EXISTS idx_sh_cancelled ON settlement_header(is_cancelled);
+
+CREATE TABLE IF NOT EXISTS payment_detail (
+  payment_id TEXT PRIMARY KEY NOT NULL,
+  settlement_id TEXT NOT NULL,
+  bill_no TEXT,
+  pay_mode TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  start_date TEXT NOT NULL,
+  created_on TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pd_settlement_id ON payment_detail(settlement_id);
+
+CREATE TABLE IF NOT EXISTS staff_attendance (
+  id TEXT PRIMARY KEY NOT NULL,
+  user_id TEXT NOT NULL,
+  user_name TEXT NOT NULL,
+  staff_name TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  action_name TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  created_date TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_att_user ON staff_attendance(user_id);
+CREATE INDEX IF NOT EXISTS idx_att_date ON staff_attendance(created_date);
+
+CREATE TABLE IF NOT EXISTS sales_alteration_queue (
+  id TEXT PRIMARY KEY NOT NULL,
+  action_type TEXT NOT NULL, -- 'VOID_ITEM', 'CANCEL_ORDER', 'CHANGE_PAYMENT'
+  settlement_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cash_drawer_logs (
+  id TEXT PRIMARY KEY NOT NULL,
+  outlet_id INTEGER DEFAULT 1,
+  terminal_code TEXT DEFAULT 'T1',
+  action_type TEXT NOT NULL,
+  amount REAL DEFAULT 0,
+  tendered_amount REAL DEFAULT 0,
+  change_amount REAL DEFAULT 0,
+  order_id TEXT,
+  reason TEXT,
+  remark TEXT,
+  opened_by_user_id TEXT,
+  approved_by_user_id TEXT,
+  open_source TEXT DEFAULT 'MANUAL',
+  attachment_url TEXT,
+  is_success INTEGER DEFAULT 1,
+  created_at TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_cdl_action ON cash_drawer_logs(action_type);
+CREATE INDEX IF NOT EXISTS idx_cdl_created ON cash_drawer_logs(created_at);
+
+CREATE TABLE IF NOT EXISTS day_end_records (
+  id TEXT PRIMARY KEY NOT NULL,
+  business_date TEXT NOT NULL,
+  closed_by TEXT NOT NULL,
+  closed_at TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  is_synced INTEGER NOT NULL DEFAULT 0
+);
 `;
+
+
+

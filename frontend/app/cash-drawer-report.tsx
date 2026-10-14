@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -83,11 +83,24 @@ export default function CashDrawerReportScreen() {
         setLogs(res.data.data || []);
       }
     } catch (err) {
-      console.warn('Failed to fetch activity logs:', err);
+      console.warn('⚠️ API failed, restoring cash drawer logs from local SQLite:', err);
+      try {
+        const { CashDrawerRepository } = require('../db/CashDrawerRepository');
+        const localLogs = await CashDrawerRepository.getLogs({
+          actionType: actionFilter,
+          terminalCode: terminalFilter,
+        });
+        if (Array.isArray(localLogs)) {
+          setLogs(localLogs);
+        }
+      } catch (dbErr) {
+        console.error('Failed to query local cash drawer logs:', dbErr);
+      }
     } finally {
       setLoading(false);
     }
   };
+
 
   // Computations
   const totalTriggers = logs.length;

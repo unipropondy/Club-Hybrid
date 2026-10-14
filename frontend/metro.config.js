@@ -6,6 +6,22 @@ const config = getDefaultConfig(__dirname);
 // Watch the shared customer-display package for live reload during development
 config.watchFolders = [path.resolve(__dirname, 'packages/customer-display')];
 
+// Exclude heavy directories like android, backend, build artifacts from Metro file map
+const exclusionList = [
+  /.*[\\\/]android[\\\/].*/,
+  /.*[\\\/]dist[\\\/].*/,
+  /.*[\\\/]\.expo[\\\/].*/,
+  /.*[\\\/]\.git[\\\/].*/,
+];
+
+if (Array.isArray(config.resolver.blockList)) {
+  config.resolver.blockList.push(...exclusionList);
+} else if (config.resolver.blockList) {
+  config.resolver.blockList = [config.resolver.blockList, ...exclusionList];
+} else {
+  config.resolver.blockList = exclusionList;
+}
+
 // mssql / express / etc. are Node.js-only packages that use `import.meta`.
 // They cannot be bundled by Metro for web/RN → stub them out.
 const STUB = path.resolve(__dirname, 'shims/empty-module.js');

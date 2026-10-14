@@ -124,16 +124,38 @@ export default function CashDrawerScreen() {
       const data = await res.json();
       if (data.success) {
         setStep(2);
+        return;
       } else {
         setPinError("Invalid Admin PIN. Management permissions required.");
         setPin("");
+        return;
       }
     } catch (err) {
-      setPinError("Authentication service connection failed.");
+      console.warn("⚠️ Network error verifying PIN, checking offline cached users...");
+      try {
+        const { UserRepository, verifyPasswordMatch } = require("../db/UserRepository");
+        const cachedUsers = await UserRepository.getAllCachedUsers();
+        // Allow any active admin/manager
+        const isMatched = cachedUsers.some((u: any) => {
+          const role = String(u.role || "").toUpperCase();
+          const isAdminOrManager = role.includes("ADMIN") || role.includes("MANAGER");
+          return isAdminOrManager && verifyPasswordMatch(pin, u.user_password || "");
+        });
+
+        if (isMatched) {
+          setStep(2);
+          return;
+        }
+        setPinError("Invalid Admin PIN. Management permissions required.");
+        setPin("");
+      } catch (localErr: any) {
+        setPinError("Authentication failed offline.");
+      }
     } finally {
       setVerifying(false);
     }
   };
+
 
   const handleReasonSelect = (reason: ReasonConfig) => {
     setSelectedReason(reason.label);

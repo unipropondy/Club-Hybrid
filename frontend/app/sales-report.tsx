@@ -492,7 +492,22 @@ export default function SalesReport() {
         });
       }
     } catch (err) {
-      console.error(err);
+      console.warn("⚠️ Network failed, attempting offline item voiding in SQLite...");
+      try {
+        const { SettlementRepository } = require("../db/SettlementRepository");
+        await SettlementRepository.voidItemOffline(selectedOrder.SettlementID, selectedVoidItemIds);
+        showToast({
+          type: "warning",
+          message: "Voided Offline",
+          subtitle: "Item voided locally & queued for sync",
+        });
+        setShowVoidItemModal(false);
+        setSelectedOrder(null);
+        fetchData();
+        return;
+      } catch (localErr: any) {
+        console.error("Offline void error:", localErr);
+      }
       showToast({
         type: "error",
         message: "Error",
@@ -533,7 +548,22 @@ export default function SalesReport() {
         });
       }
     } catch (err) {
-      console.error(err);
+      console.warn("⚠️ Network failed, attempting offline order cancellation in SQLite...");
+      try {
+        const { SettlementRepository } = require("../db/SettlementRepository");
+        await SettlementRepository.cancelOrderOffline(selectedOrder.SettlementID, cancellationReason || "Manual Cancellation");
+        showToast({
+          type: "warning",
+          message: "Cancelled Offline",
+          subtitle: "Order cancelled locally & queued for sync",
+        });
+        setShowCancelOrderConfirm(false);
+        setSelectedOrder(null);
+        fetchData();
+        return;
+      } catch (localErr: any) {
+        console.error("Offline cancel error:", localErr);
+      }
       showToast({
         type: "error",
         message: "Error",
@@ -623,7 +653,22 @@ export default function SalesReport() {
         });
       }
     } catch (err) {
-      console.error(err);
+      console.warn("⚠️ Network failed, attempting offline payment mode change in SQLite...");
+      try {
+        const { SettlementRepository } = require("../db/SettlementRepository");
+        await SettlementRepository.changePaymentOffline(selectedOrder.SettlementID, selectedPayMode);
+        showToast({
+          type: "warning",
+          message: "Changed Offline",
+          subtitle: "Payment mode changed locally & queued for sync",
+        });
+        setShowChangePaymentModal(false);
+        setSelectedOrder(null);
+        fetchData();
+        return;
+      } catch (localErr: any) {
+        console.error("Offline payment change error:", localErr);
+      }
       showToast({
         type: "error",
         message: "Error",
@@ -807,10 +852,9 @@ export default function SalesReport() {
   }, [selectedFilter, detailReportType, fetchDetailReport]);
 
   const fetchSales = async () => {
+    let startStr = selectedDate;
+    let endStr = selectedDate;
     try {
-      let startStr = selectedDate;
-      let endStr = selectedDate;
-
       if (selectedFilter === "WEEKLY") {
         const start = new Date(selectedDate);
         start.setDate(start.getDate() - 6);
@@ -853,12 +897,19 @@ export default function SalesReport() {
         setSales([]);
       }
     } catch (error) {
-      console.log("ℹ️ [SalesReport] Offline: restoring local sales from SQLite...");
+      console.log("ℹ️ [SalesReport] Offline: restoring local sales from SQLite settlement_header...");
       try {
+        const { SettlementRepository } = require("../db/SettlementRepository");
+        const localSettlements = await SettlementRepository.getSettlementsByRange(startStr, endStr);
+        if (Array.isArray(localSettlements) && localSettlements.length > 0) {
+          setSales(localSettlements);
+          return;
+        }
         const { OrderRepository } = require("../db/OrderRepository");
         const localSummary = await OrderRepository.getDailySalesSummary(selectedDate);
         if (localSummary && localSummary.recentBills && localSummary.recentBills.length > 0) {
           const mapped = localSummary.recentBills.map((b: any) => ({
+            SettlementID: b.client_id || b.order_id,
             BillNo: b.order_number,
             OrderNumber: b.order_number,
             TableNo: b.table_no,
@@ -875,7 +926,9 @@ export default function SalesReport() {
           setSales(mapped);
           return;
         }
-      } catch (_) {}
+      } catch (err: any) {
+        console.error("Local sales lookup error:", err);
+      }
       setSales([]);
     }
   };
@@ -1896,7 +1949,19 @@ export default function SalesReport() {
         }
       }
     } catch (e) {
-      console.error("Detail fetch error:", e);
+      console.warn("⚠️ [SalesReport] Network error on detail fetch, checking local SQLite...");
+      try {
+        const { SettlementRepository } = require("../db/SettlementRepository");
+        const localItems = await SettlementRepository.getItemsBySettlementId(settlementId);
+        const localPayments = await SettlementRepository.getPaymentsBySettlementId(settlementId);
+        if (localItems && localItems.length > 0) {
+          setOrderDetails(localItems);
+          setOrderPayments(localPayments || []);
+          return;
+        }
+      } catch (localErr: any) {
+        console.error("Local order details error:", localErr);
+      }
       setOrderDetails([]);
       setOrderPayments([]);
     } finally {

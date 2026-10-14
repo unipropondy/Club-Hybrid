@@ -189,11 +189,39 @@ export default function DayEndScreen() {
       }
     } catch (_) {}
     try {
-      const res = await API.post("/settlement/day-end", {
-        username: user?.userName || "admin"
-      });
-      const data = res.data;
-      if (data.success) {
+      let isSuccess = false;
+      let errorMsg = "";
+      try {
+        const res = await API.post("/settlement/day-end", {
+          username: user?.userName || "admin",
+          businessDate: dateRange.start
+        });
+        const data = res.data;
+        if (data.success) {
+          isSuccess = true;
+        } else {
+          errorMsg = data.error || "Failed to complete Day End.";
+        }
+      } catch (dayEndNetErr) {
+        console.warn("⚠️ [DayEnd] Server offline during Day End: recording day_end_records locally:", dayEndNetErr);
+        const { executeQuery } = require("../db/database");
+        const now = new Date().toISOString();
+        const dateStr = dateRange.start || now.split("T")[0];
+        await executeQuery(
+          `INSERT OR REPLACE INTO day_end_records (id, business_date, closed_by, closed_at, summary_json, is_synced)
+           VALUES (?, ?, ?, ?, ?, 0)`,
+          [
+            `dayend_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            dateStr,
+            user?.userName || "admin",
+            now,
+            JSON.stringify(data || {})
+          ]
+        );
+        isSuccess = true;
+      }
+
+      if (isSuccess) {
         // Clear selected business date from AsyncStorage to reset
         await AsyncStorage.removeItem("selected_business_date");
         if (Platform.OS === 'web') {
@@ -211,9 +239,9 @@ export default function DayEndScreen() {
         }
       } else {
         if (Platform.OS === 'web') {
-          alert(data.error || "Failed to complete Day End.");
+          alert(errorMsg || "Failed to complete Day End.");
         } else {
-          Alert.alert("Error", data.error || "Failed to complete Day End.");
+          Alert.alert("Error", errorMsg || "Failed to complete Day End.");
         }
       }
     } catch (err: any) {

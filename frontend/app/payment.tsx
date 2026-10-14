@@ -1937,6 +1937,43 @@ export default function PaymentScreen() {
 
         console.log(`💾 [Payment] Offline sale ${offlineBillNo} saved locally in SQLite!`);
 
+        // 1.5 Mirror into SettlementHeader, RestaurantInvoice, and RestaurantOrderDetailCur for instant offline reports & reprint
+        try {
+          const { SettlementRepository } = require("../db/SettlementRepository");
+          const AsyncStorageModule = require("@react-native-async-storage/async-storage").default;
+          const businessDate = (await AsyncStorageModule.getItem("selected_business_date")) || new Date().toISOString().split("T")[0];
+          await SettlementRepository.recordCompleteSale({
+            settlementId: checkoutSessionId,
+            billNo: offlineBillNo,
+            subtotal: subtotal || 0,
+            totalTax: displayedTax || 0,
+            discountAmount: (discountAmount + payItemDiscount) || 0,
+            totalAmount: total || 0,
+            tableNo: String(context?.tableNo || saleData.tableNo || "TA"),
+            orderType: context?.orderType || "DINE-IN",
+            section: context?.section || "MAIN",
+            payMode: saleData.paymentMethod || "CASH",
+            serverName: user?.userName || context?.serverName || "Staff",
+            startDate: businessDate,
+            createdBy: user?.userId || "",
+            payments: payments && payments.length > 0 ? payments : [{ payMode: saleData.paymentMethod || "CASH", amount: total }],
+            items: (calculatedItems || finalItems || []).map((item: any) => ({
+              dishId: item.dishId || item.DishId || item.id || "00000000-0000-0000-0000-000000000000",
+              dishName: item.name || "Item",
+              quantity: Number(item.qty || 1),
+              price: Number(item.price || 0),
+              actualAmount: Number(item.price || 0) * Number(item.qty || 1),
+              categoryId: item.categoryId || item.DishGroupId || "",
+              categoryName: item.categoryName || item.DishGroupName || "",
+              comboSelections: item.comboSelections,
+              modifiers: item.modifiers,
+            })),
+          });
+          console.log(`🧾 [Payment] Offline sale ${offlineBillNo} mirrored into SQLite sales tables.`);
+        } catch (mirrorErr: any) {
+          console.warn("⚠️ [Payment] SQLite sales mirror warning:", mirrorErr.message);
+        }
+
         showToast({
           type: "warning",
           message: "Paid Offline",

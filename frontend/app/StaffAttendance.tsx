@@ -228,21 +228,47 @@ export default function StaffAttendanceScreen() {
         setUserId(data.UserId);
         await AsyncStorage.setItem("lastUserName", name);
         await AsyncStorage.setItem("lastUserId", data.UserId);
-      } else {
-        setStaffName("");
-        setUserId("");
+        return;
       }
-    } catch (_) {
-      setStaffName("");
-      setUserId("");
+    } catch (_) {}
+
+    // Offline SQLite fallback
+    try {
+      const { UserRepository } = require("../db/UserRepository");
+      const users = await UserRepository.getAllCachedUsers();
+      const matched = users.find((u: any) => 
+        String(u.user_name || "").toLowerCase() === name.toLowerCase() ||
+        String(u.user_code || "").toLowerCase() === name.toLowerCase()
+      );
+      if (matched) {
+        setStaffName(matched.full_name || matched.user_name);
+        setUserId(matched.user_id);
+        await AsyncStorage.setItem("lastUserName", name);
+        await AsyncStorage.setItem("lastUserId", matched.user_id);
+        return;
+      }
+    } catch (e) {
+      console.warn("Offline staff lookup error:", e);
     }
+
+    setStaffName("");
+    setUserId("");
   };
 
   const fetchTodayLogs = async (id: string) => {
     try {
       const response = await fetch(`${API_URL}/api/attendance/today/${id}`);
       const data = await response.json();
-      if (response.ok) setTodayLogs(data);
+      if (response.ok) {
+        setTodayLogs(data);
+        return;
+      }
+    } catch (_) {}
+
+    try {
+      const { AttendanceRepository } = require("../db/AttendanceRepository");
+      const localLogs = await AttendanceRepository.getTodayLogs(id);
+      if (Array.isArray(localLogs)) setTodayLogs(localLogs);
     } catch (_) {}
   };
 
@@ -254,7 +280,15 @@ export default function StaffAttendanceScreen() {
       if (response.ok && data.summary) {
         setTodaySummary(data.summary);
         await fetchTodayLogs(userId);
+        return;
       }
+    } catch (_) {}
+
+    try {
+      const { AttendanceRepository } = require("../db/AttendanceRepository");
+      const localSummary = await AttendanceRepository.getTodaySummary(userId);
+      setTodaySummary(localSummary);
+      await fetchTodayLogs(userId);
     } catch (_) {}
   };
 
@@ -280,7 +314,34 @@ export default function StaffAttendanceScreen() {
         setTodaySummary(null); setTodayLogs([]);
       }
     } catch (err: any) {
-      Alert.alert("Error", err.message);
+      console.warn("⚠️ Network failed, attempting offline attendance logging in SQLite...");
+      try {
+        const { UserRepository, AttendanceRepository } = require("../db");
+        // Verify credentials offline
+        const authCheck = await UserRepository.authenticateOffline(userName, password);
+        if (!authCheck.success) {
+          Alert.alert("Error", authCheck.message || "Invalid Password");
+          return;
+        }
+
+        // Record attendance offline
+        await AttendanceRepository.recordAttendance({
+          userId,
+          userName,
+          staffName: staffName || userName,
+          status,
+        });
+
+        Alert.alert("Logged Offline", "Attendance saved locally & queued for sync.");
+        if (status !== 1) setPassword("");
+        await fetchTodaySummary();
+        if (status === 0) {
+          setUserName(""); setPassword(""); setStaffName(""); setUserId("");
+          setTodaySummary(null); setTodayLogs([]);
+        }
+      } catch (offlineErr: any) {
+        Alert.alert("Error", offlineErr.message || "Failed to record attendance");
+      }
     } finally {
       setIsLoading(false);
     }

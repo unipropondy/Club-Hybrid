@@ -18,11 +18,24 @@ const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
  * Guarantees transactional idempotency using client_id and ClientOrderID.
  */
 router.post("/push", async (req, res) => {
-  const { batch } = req.body; // batch: Array of { order, items }
+  const { batch, alterations, attendance, drawer_logs } = req.body;
 
-  if (!batch || !Array.isArray(batch) || batch.length === 0) {
-    return res.json({ success: true, processed_count: 0, synced_client_ids: [] });
+  const hasOrders = Array.isArray(batch) && batch.length > 0;
+  const hasAlt = Array.isArray(alterations) && alterations.length > 0;
+  const hasAtt = Array.isArray(attendance) && attendance.length > 0;
+  const hasDrawer = Array.isArray(drawer_logs) && drawer_logs.length > 0;
+
+  if (!hasOrders && !hasAlt && !hasAtt && !hasDrawer) {
+    return res.json({
+      success: true,
+      processed_count: 0,
+      synced_client_ids: [],
+      synced_alteration_ids: [],
+      synced_attendance_ids: [],
+      synced_drawer_ids: [],
+    });
   }
+
 
   let pool;
   let transaction;
@@ -356,8 +369,116 @@ router.post("/push", async (req, res) => {
       syncedClientIds.push(clientId);
     }
 
+    // Process Alterations (Voids, Cancellations, Payment mode changes)
+    const syncedAlterationIds = [];
+    if (Array.isArray(alterations) && alterations.length > 0) {
+      for (const alt of alterations) {
+        try {
+          const sid = alt.settlement_id;
+          const payload = typeof alt.payload === 'string' ? JSON.parse(alt.payload) : (alt.payload || {});
+
+          if (alt.action_type === 'CANCEL_ORDER') {
+            await transaction.request()
+              .input("sid", sql.UniqueIdentifier, sid)
+              .input("reason", sql.NVarChar(255), payload.reason || "Manual Cancellation")
+              .query(`
+                UPDATE SettlementHeader SET IsCancelled = 1, CancellationReason = @reason WHERE SettlementID = @sid;
+                UPDATE RestaurantInvoice SET StatusCode = 4 WHERE RestaurantBillId = @sid;
+                UPDATE RestaurantInvoiceCur SET StatusCode = 4 WHERE RestaurantBillId = @sid;
+              `);
+          } else if (alt.action_type === 'VOID_ITEM') {
+            const itemIds = payload.orderDetailIds || [];
+            for (const iId of itemIds) {
+              await transaction.request()
+                .input("detId", sql.UniqueIdentifier, iId)
+                .query(`
+                  UPDATE RestaurantOrderDetailCur SET isVoid = 1 WHERE OrderDetailId = @detId;
+                  UPDATE RestaurantOrderDetail SET isVoid = 1 WHERE OrderDetailId = @detId;
+                `);
+            }
+          } else if (alt.action_type === 'CHANGE_PAYMENT') {
+            const pMode = String(payload.payMode || 'CASH').toUpperCase();
+            await transaction.request()
+              .input("sid", sql.UniqueIdentifier, sid)
+              .input("payMode", sql.VarChar(50), pMode)
+              .query(`
+                UPDATE SettlementHeader SET PayMode = @payMode WHERE SettlementID = @sid;
+                UPDATE RestaurantInvoice SET PaymentTermCode = @payMode WHERE RestaurantBillId = @sid;
+                UPDATE RestaurantInvoiceCur SET PaymentTermCode = @payMode WHERE RestaurantBillId = @sid;
+                UPDATE SettlementTotalSales SET PayMode = @payMode WHERE SettlementID = @sid;
+              `);
+          }
+          syncedAlterationIds.push(alt.id);
+        } catch (altErr) {
+          console.warn("⚠️ Alteration sync warning:", altErr.message);
+        }
+      }
+    }
+
+    // Process Attendance Punches
+    const syncedAttendanceIds = [];
+    if (Array.isArray(attendance) && attendance.length > 0) {
+      for (const att of attendance) {
+        try {
+          await transaction.request()
+            .input("userId", sql.UniqueIdentifier, att.user_id)
+            .input("userName", sql.NVarChar(100), att.user_name || "")
+            .input("staffName", sql.NVarChar(100), att.staff_name || "")
+            .input("status", sql.Int, att.status)
+            .input("actionName", sql.NVarChar(50), att.action_name || "")
+            .input("logTime", sql.DateTime, att.timestamp ? new Date(att.timestamp) : new Date())
+            .query(`
+              INSERT INTO StaffAttendance (UserId, UserName, StaffName, Status, ActionName, LoginTime)
+              VALUES (@userId, @userName, @staffName, @status, @actionName, @logTime)
+            `);
+          syncedAttendanceIds.push(att.id);
+        } catch (attErr) {
+          console.warn("⚠️ Attendance punch sync warning:", attErr.message);
+        }
+      }
+    }
+
+    // Process Cash Drawer Logs (Cash In, Cash Out, Float, etc.)
+    const syncedDrawerIds = [];
+    if (Array.isArray(drawer_logs) && drawer_logs.length > 0) {
+      for (const log of drawer_logs) {
+        try {
+          const userGuid = (log.opened_by_user_id && IS_UUID_REGEX.test(log.opened_by_user_id))
+            ? log.opened_by_user_id
+            : defaultUserGuid;
+
+          await transaction.request()
+            .input("outletId", sql.Int, log.outlet_id || 1)
+            .input("terminalCode", sql.VarChar(20), log.terminal_code || "T1")
+            .input("actionType", sql.VarChar(50), log.action_type || "OTHER")
+            .input("amount", sql.Decimal(18, 2), parseFloat(log.amount) || 0)
+            .input("tendered", sql.Decimal(18, 2), parseFloat(log.tendered_amount) || 0)
+            .input("change", sql.Decimal(18, 2), parseFloat(log.change_amount) || 0)
+            .input("reason", sql.NVarChar(200), log.reason || null)
+            .input("remark", sql.NVarChar(500), log.remark || null)
+            .input("userId", sql.UniqueIdentifier, userGuid)
+            .input("source", sql.VarChar(20), log.open_source || "MANUAL")
+            .input("attUrl", sql.VarChar(500), log.attachment_url || null)
+            .input("isSuccess", sql.Bit, log.is_success === 0 ? 0 : 1)
+            .input("createdAt", sql.DateTime, log.created_at ? new Date(log.created_at) : new Date())
+            .query(`
+              INSERT INTO CashDrawerActivityLog (
+                OutletId, TerminalCode, ActionType, Amount, TenderedAmount, ChangeAmount,
+                Reason, Remark, OpenedByUserId, OpenSource, AttachmentUrl, IsSuccess, CreatedAt
+              ) VALUES (
+                @outletId, @terminalCode, @actionType, @amount, @tendered, @change,
+                @reason, @remark, @userId, @source, @attUrl, @isSuccess, @createdAt
+              )
+            `);
+          syncedDrawerIds.push(log.id);
+        } catch (dlErr) {
+          console.warn("⚠️ Cash drawer log sync warning:", dlErr.message);
+        }
+      }
+    }
+
     await transaction.commit();
-    console.log(`☁️ [TabletSync] Push succeeded. Processed ${syncedClientIds.length} batch orders.`);
+    console.log(`☁️ [TabletSync] Push succeeded. Orders: ${syncedClientIds.length}, Alterations: ${syncedAlterationIds.length}, Attendance: ${syncedAttendanceIds.length}, Drawer Logs: ${syncedDrawerIds.length}`);
 
     // Broadcast update to all active POS / KDS screens via Socket.io
     const io = req.app.get("io");
@@ -383,6 +504,9 @@ router.post("/push", async (req, res) => {
       success: true,
       processed_count: syncedClientIds.length,
       synced_client_ids: syncedClientIds,
+      synced_alteration_ids: syncedAlterationIds,
+      synced_attendance_ids: syncedAttendanceIds,
+      synced_drawer_ids: syncedDrawerIds,
     });
   } catch (error) {
     if (transaction) {
@@ -632,6 +756,193 @@ router.get("/pull", async (req, res) => {
       console.warn("⚠️ [TabletSync Pull] License fetch warning:", licErr.message);
     }
 
+    // 12. Fetch All Modifiers & Dish Associations
+    let modifiersData = [];
+    try {
+      const modRes = await pool.request().query(`
+        SELECT 
+          m.ModifierId as modifier_id,
+          dm.DishId as dish_id,
+          m.ModifierGroupId as group_id,
+          m.ModifierCode as modifier_code,
+          m.ModifierName as modifier_name,
+          CASE WHEN m.isPriceAffect = 1 AND m.isDishPrice = 1 THEN ISNULL(m.DishCost, 0) ELSE 0 END as price,
+          ISNULL(m.isOpenModifier, 0) as is_open_modifier,
+          ISNULL(m.SortCode, 0) as sort_code
+        FROM DishModifier dm WITH (NOLOCK)
+        INNER JOIN ModifierMaster m WITH (NOLOCK) ON dm.ModifierId = m.ModifierId
+      `);
+      modifiersData = modRes.recordset || [];
+    } catch (mErr) {
+      console.warn("⚠️ [TabletSync Pull] Modifiers fetch warning:", mErr.message);
+    }
+
+    // 13. Fetch All Combo Configurations
+    let combosData = [];
+    try {
+      const comboHeaderRes = await pool.request().query(`
+        SELECT 
+          ch.ComboId,
+          ch.DishId,
+          d.Name,
+          ISNULL(d.currentcost, 0) as BasePrice
+        FROM ComboHeader ch WITH (NOLOCK)
+        INNER JOIN DishMaster d WITH (NOLOCK) ON ch.DishId = d.DishId
+        WHERE ch.IsActive = 1
+      `);
+
+      for (const ch of (comboHeaderRes.recordset || [])) {
+        const groupsRes = await pool.request()
+          .input("comboId", sql.UniqueIdentifier, ch.ComboId)
+          .query(`
+            SELECT 
+              cg.ComboGroupId,
+              cg.GroupName,
+              cg.DisplayOrder,
+              cg.MinSelection,
+              cg.MaxSelection,
+              cg.IsMultiSelect
+            FROM ComboGroup cg WITH (NOLOCK)
+            WHERE cg.ComboId = @comboId AND cg.IsActive = 1
+            ORDER BY cg.DisplayOrder
+          `);
+
+        const groups = [];
+        for (const g of (groupsRes.recordset || [])) {
+          const optRes = await pool.request()
+            .input("groupId", sql.UniqueIdentifier, g.ComboGroupId)
+            .query(`
+              SELECT 
+                cgo.MappingId,
+                cgo.DishId,
+                d.Name,
+                cgo.Surcharge,
+                cgo.IsDefault,
+                cgo.SortOrder
+              FROM ComboGroupOption cgo WITH (NOLOCK)
+              INNER JOIN DishMaster d WITH (NOLOCK) ON cgo.DishId = d.DishId
+              WHERE cgo.ComboGroupId = @groupId AND cgo.IsActive = 1
+              ORDER BY cgo.SortOrder
+            `);
+
+          groups.push({
+            comboGroupId: g.ComboGroupId,
+            groupName: g.GroupName,
+            displayOrder: g.DisplayOrder,
+            minSelection: g.MinSelection,
+            maxSelection: g.MaxSelection,
+            isMultiSelect: g.IsMultiSelect,
+            options: (optRes.recordset || []).map(o => ({
+              mappingId: o.MappingId,
+              dishId: o.DishId,
+              name: o.Name,
+              surcharge: o.Surcharge,
+              isDefault: o.IsDefault,
+              sortOrder: o.SortOrder
+            }))
+          });
+        }
+
+        combosData.push({
+          combo_id: ch.ComboId,
+          dish_id: ch.DishId,
+          name: ch.Name,
+          base_price: ch.BasePrice,
+          raw_config: JSON.stringify({
+            dishId: ch.DishId,
+            name: ch.Name,
+            basePrice: ch.BasePrice,
+            groups
+          })
+        });
+      }
+    } catch (cErr) {
+      console.warn("⚠️ [TabletSync Pull] Combos fetch warning:", cErr.message);
+    }
+
+    // 14. Fetch Recent Settlements & Invoices for Active Business Day
+    let settlementsData = [];
+    let orderDetailsData = [];
+    let paymentDetailsData = [];
+    try {
+      const sDateFilter = activeBusinessDayData?.startDate || new Date().toISOString().split("T")[0];
+      const setReq = pool.request();
+      setReq.input("sDate", sql.Date, sDateFilter);
+
+      const setRes = await setReq.query(`
+        SELECT TOP 100
+          SettlementID, BillNo, SubTotal, TotalTax, DiscountAmount, SysAmount,
+          ManualAmount, TableNo, OrderType, Section, PayMode, SER_NAME,
+          IsCancelled, CancellationReason, CONVERT(VARCHAR, start_date, 23) as start_date,
+          CreatedOn, CreatedBy
+        FROM SettlementHeader WITH (NOLOCK)
+        WHERE start_date = @sDate
+        ORDER BY CreatedOn DESC
+      `);
+      settlementsData = setRes.recordset || [];
+
+      // Associated items from SettlementItemDetail / RestaurantOrderDetailCur
+      const detReq = pool.request();
+      detReq.input("sDate", sql.Date, sDateFilter);
+      const detRes = await detReq.query(`
+        SELECT TOP 500
+          d.OrderDetailId, d.OrderId, d.DishId, d.Description as DishName,
+          d.Quantity, d.PricePerUnit, d.ActualAmount, d.StatusCode,
+          d.isVoid, d.CategoryId, d.CategoryName, d.SubCategoryName,
+          d.ComboDetailsJSON, d.ModifiersJSON,
+          CONVERT(VARCHAR, d.start_date, 23) as start_date, d.OrderDateTime as CreatedOn
+        FROM RestaurantOrderDetailCur d WITH (NOLOCK)
+        WHERE d.start_date = @sDate
+      `);
+      orderDetailsData = detRes.recordset || [];
+
+      // Associated payment details
+      const payReq = pool.request();
+      payReq.input("sDate", sql.Date, sDateFilter);
+      const payRes = await payReq.query(`
+        SELECT TOP 200
+          PaymentId, RestaurantBillId, Paymode as PayMode, Amount,
+          CONVERT(VARCHAR, start_date, 23) as start_date, CreatedOn
+        FROM PaymentDetailCur WITH (NOLOCK)
+        WHERE start_date = @sDate
+      `);
+      paymentDetailsData = payRes.recordset || [];
+    } catch (sErr) {
+      console.warn("⚠️ [TabletSync Pull] Sales tables fetch warning:", sErr.message);
+    }
+
+    // 15. Fetch Staff Attendance for Today
+    let attendanceData = [];
+    try {
+      const attRes = await pool.request().query(`
+        SELECT TOP 50
+          Id, UserId, UserName, StaffName, Status, ActionName, LoginTime
+        FROM StaffAttendance WITH (NOLOCK)
+        WHERE CAST(LoginTime AS DATE) = CAST(GETDATE() AS DATE)
+        ORDER BY LoginTime DESC
+      `);
+      attendanceData = attRes.recordset || [];
+    } catch (aErr) {
+      console.warn("⚠️ [TabletSync Pull] Attendance fetch warning:", aErr.message);
+    }
+
+    // 16. Fetch Cash Drawer Logs for Today (Cash In / Out / Floats)
+    let drawerLogsData = [];
+    try {
+      const cdlRes = await pool.request().query(`
+        SELECT TOP 100
+          Id, OutletId, TerminalCode, ActionType, Amount, TenderedAmount,
+          ChangeAmount, Reason, Remark, OpenedByUserId, OpenSource, AttachmentUrl,
+          IsSuccess, CreatedAt
+        FROM CashDrawerActivityLog WITH (NOLOCK)
+        WHERE CAST(CreatedAt AS DATE) = CAST(GETDATE() AS DATE)
+        ORDER BY CreatedAt DESC
+      `);
+      drawerLogsData = cdlRes.recordset || [];
+    } catch (cdlErr) {
+      console.warn("⚠️ [TabletSync Pull] Cash drawer logs fetch warning:", cdlErr.message);
+    }
+
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -646,12 +957,21 @@ router.get("/pull", async (req, res) => {
       permissions: permissionsData,
       active_business_day: activeBusinessDayData,
       license: licenseData,
+      modifiers: modifiersData,
+      combos: combosData,
+      settlements: settlementsData,
+      order_details: orderDetailsData,
+      payment_details: paymentDetailsData,
+      attendance: attendanceData,
+      drawer_logs: drawerLogsData,
     });
+
   } catch (error) {
     console.error("❌ [TabletSync Pull Error]:", error);
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
 
 
 const {

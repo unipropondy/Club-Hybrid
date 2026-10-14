@@ -203,12 +203,122 @@ export default function ComboCustomizer({
         throw new Error(payload.error || "Failed to load combo config.");
       }
     } catch (err: any) {
-      console.error("Combo config fetch error:", err);
-      setError(err.message || "Something went wrong.");
+      console.warn("⚠️ Combo online fetch failed, activating SQLite offline fallback:", err.message);
+      try {
+        const { ComboRepository, ModifierRepository } = require("../db");
+
+        // 1. Fetch offline modifiers
+        const localMods = await ModifierRepository.getModifiersByDishId(dish.DishId);
+        if (Array.isArray(localMods) && localMods.length > 0) {
+          setDishModifiers(localMods);
+        }
+
+        // 2. Fetch offline combo configuration
+        const localCombo = await ComboRepository.getComboByDishId(dish.DishId);
+        if (localCombo && localCombo.groups) {
+          const rawGroups = localCombo.groups || [];
+          const normalizedGroups = rawGroups.map((g: any) => {
+            const parseBool = (v: any) =>
+              v === true || v === 1 || String(v) === "1" || String(v) === "true";
+            const isMulti =
+              g.isMultiSelect !== undefined
+                ? parseBool(g.isMultiSelect)
+                : parseBool(g.IsMultiSelect);
+            let maxSelect =
+              g.maxSelection !== undefined
+                ? Number(g.maxSelection)
+                : Number(g.MaxSelection || 1);
+            if (isMulti && maxSelect <= 1) {
+              maxSelect = 999;
+            }
+            const minSelect =
+              g.minSelection !== undefined
+                ? Number(g.minSelection)
+                : Number(g.MinSelection || 0);
+            const comboGroupId = g.comboGroupId || g.ComboGroupId;
+            const groupName = g.groupName || g.GroupName;
+            const rawOptions = g.options || g.Options || [];
+
+            const normalizedOptions = rawOptions.map((o: any) => ({
+              mappingId: o.mappingId || o.MappingId,
+              dishId: o.dishId || o.DishId,
+              name: o.name || o.DishName || o.Name,
+              description: o.description || o.DishDescription || o.Description,
+              surcharge:
+                o.surcharge !== undefined
+                  ? Number(o.surcharge)
+                  : Number(o.Surcharge || 0),
+              dishPrice:
+                o.dishPrice !== undefined
+                  ? Number(o.dishPrice)
+                  : Number(o.DishPrice || 0),
+              isDefault:
+                o.isDefault !== undefined
+                  ? parseBool(o.isDefault)
+                  : parseBool(o.IsDefault),
+              sortOrder:
+                o.sortOrder !== undefined
+                  ? Number(o.sortOrder)
+                  : Number(o.SortOrder || 0),
+              KitchenTypeCode: o.KitchenTypeCode,
+              KitchenTypeName: o.KitchenTypeName,
+              PrinterIP: o.PrinterIP,
+            }));
+
+            return {
+              comboGroupId,
+              groupName,
+              displayOrder: g.displayOrder || g.DisplayOrder || 0,
+              minSelection: minSelect,
+              maxSelection: maxSelect,
+              isMultiSelect: isMulti,
+              options: normalizedOptions,
+            };
+          });
+
+          const normalizedConfig: ComboConfig = {
+            dishId: localCombo.dishId || dish.DishId,
+            name: localCombo.name || dish.Name,
+            basePrice: parseFloat(localCombo.basePrice || dish.Cost || 0),
+            description: localCombo.description || "",
+            groups: normalizedGroups,
+          };
+
+          setConfig(normalizedConfig);
+
+          // Auto-select defaults
+          const initialSelections: Record<string, string[]> = {};
+          normalizedGroups.forEach((group: ComboGroup) => {
+            let defaults = group.options
+              .filter((o) => o.isDefault)
+              .map((o) => o.dishId);
+            if (!group.isMultiSelect || group.maxSelection === 1) {
+              defaults = defaults.slice(0, 1);
+            }
+            if (
+              defaults.length === 0 &&
+              group.minSelection > 0 &&
+              group.options &&
+              group.options.length > 0
+            ) {
+              defaults = [group.options[0].dishId];
+            }
+            initialSelections[group.comboGroupId] = defaults;
+          });
+          setSelections(initialSelections);
+          setError(null);
+          return;
+        }
+      } catch (localErr: any) {
+        console.error("Local SQLite combo fallback error:", localErr);
+      }
+
+      setError(err.message || "Failed to load combo config.");
     } finally {
       setLoading(false);
     }
   };
+
 
   const handleSelectOption = (
     groupId: string,

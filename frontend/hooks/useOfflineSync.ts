@@ -8,7 +8,14 @@ import {
   SettingsRepository,
   SyncQueueRepository,
   UserRepository,
+  ComboRepository,
+  ModifierRepository,
+  SettlementRepository,
+  AttendanceRepository,
+  CashDrawerRepository,
 } from '../db';
+
+
 import { useOfflineSyncStore } from '../stores/offlineSyncStore';
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -58,31 +65,75 @@ export function useOfflineSync(backendUrl: string) {
   }, [updateState]);
 
   /**
-   * Push unsynced local SQLite orders up to Counter PC / Railway
+   * Push unsynced local SQLite orders, alterations, and attendance up to Counter PC / Railway
    */
   const pushLocalOrders = useCallback(async (): Promise<number> => {
     if (!cleanUrl) return 0;
     const unsyncedBatch = await OrderRepository.getUnsyncedOrders();
-    if (unsyncedBatch.length === 0) return 0;
+    const unsyncedAlterations = await SettlementRepository.getPendingAlterations();
+    const unsyncedAttendance = await AttendanceRepository.getUnsyncedAttendance();
+    const unsyncedDrawerLogs = await CashDrawerRepository.getUnsyncedLogs();
 
-    console.log(`[OfflineSync] Found ${unsyncedBatch.length} unsynced orders to push to ${cleanUrl}...`);
+    if (
+      unsyncedBatch.length === 0 &&
+      unsyncedAlterations.length === 0 &&
+      unsyncedAttendance.length === 0 &&
+      unsyncedDrawerLogs.length === 0
+    ) {
+      return 0;
+    }
 
-    const response = await axios.post(`${cleanUrl}/api/sync/push`, {
-      batch: unsyncedBatch,
-    }, { timeout: 15000 });
+    console.log(
+      `[OfflineSync] Pushing ${unsyncedBatch.length} orders, ${unsyncedAlterations.length} alterations, ${unsyncedAttendance.length} attendance punches, ${unsyncedDrawerLogs.length} drawer logs...`
+    );
+
+    const response = await axios.post(
+      `${cleanUrl}/api/sync/push`,
+      {
+        batch: unsyncedBatch,
+        alterations: unsyncedAlterations,
+        attendance: unsyncedAttendance,
+        drawer_logs: unsyncedDrawerLogs,
+      },
+      { timeout: 15000 }
+    );
 
     if (response.data?.success) {
       const syncedIds = response.data.synced_client_ids || [];
-      await OrderRepository.markOrdersSynced(syncedIds);
-      console.log(`[OfflineSync] Push successful! Synced ${syncedIds.length} orders.`);
-      return syncedIds.length;
+      if (syncedIds.length > 0) {
+        await OrderRepository.markOrdersSynced(syncedIds);
+      }
+
+      const syncedAltIds = response.data.synced_alteration_ids || [];
+      for (const altId of syncedAltIds) {
+        await SettlementRepository.removeAlteration(altId);
+      }
+
+      const syncedAttIds = response.data.synced_attendance_ids || [];
+      if (syncedAttIds.length > 0) {
+        await AttendanceRepository.markAttendanceSynced(syncedAttIds);
+      }
+
+      const syncedDrawerIds = response.data.synced_drawer_ids || [];
+      if (syncedDrawerIds.length > 0) {
+        await CashDrawerRepository.markLogsSynced(syncedDrawerIds);
+      }
+
+      const totalSynced =
+        syncedIds.length +
+        syncedAltIds.length +
+        syncedAttIds.length +
+        syncedDrawerIds.length;
+      console.log(`[OfflineSync] Push successful! Synced ${totalSynced} items.`);
+      return totalSynced;
     } else {
       throw new Error(response.data?.error || 'Push sync rejected by server.');
     }
   }, [cleanUrl]);
 
+
   /**
-   * Pull updated master data (dishes, tables, paymodes, members, credit, settings) from server into local SQLite cache
+   * Pull updated master data and today's sales from server into local SQLite cache
    */
   const pullMasterData = useCallback(async (): Promise<void> => {
     if (!cleanUrl) return;
@@ -92,66 +143,84 @@ export function useOfflineSync(backendUrl: string) {
         // 1. Save Dishes
         if (Array.isArray(response.data.dishes) && response.data.dishes.length > 0) {
           await MenuRepository.saveMenuDishes(response.data.dishes);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.dishes.length} dishes locally.`);
         }
         // 2. Save Tables
         if (Array.isArray(response.data.tables) && response.data.tables.length > 0) {
           await TableRepository.saveTables(response.data.tables);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.tables.length} tables locally.`);
         }
         // 3. Save Payment Modes
         if (Array.isArray(response.data.paymodes) && response.data.paymodes.length > 0) {
           await PaymodeRepository.savePaymodes(response.data.paymodes);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.paymodes.length} paymodes locally.`);
         }
         // 4. Save Members
         if (Array.isArray(response.data.members) && response.data.members.length > 0) {
           await MemberRepository.saveMembers(response.data.members);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.members.length} members locally.`);
         }
         // 5. Save Credit Customers
         if (Array.isArray(response.data.credit_customers) && response.data.credit_customers.length > 0) {
           await MemberRepository.saveCreditCustomers(response.data.credit_customers);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.credit_customers.length} credit customers locally.`);
         }
         // 6. Save Company Settings
         if (response.data.company_settings) {
           await SettingsRepository.saveCompanySettings(response.data.company_settings);
-          console.log(`[OfflineSync] Pull successful! Cached company settings locally.`);
         }
         // 7. Save General Settings
         if (response.data.general_settings) {
           await SettingsRepository.saveGeneralSettings(response.data.general_settings);
-          console.log(`[OfflineSync] Pull successful! Cached general settings locally.`);
         }
         // 8. Save Users (for 100% offline APK counter login)
         if (Array.isArray(response.data.users) && response.data.users.length > 0) {
           await UserRepository.saveUsers(response.data.users);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.users.length} users locally.`);
         }
         // 9. Save User Permissions
         if (Array.isArray(response.data.permissions) && response.data.permissions.length > 0) {
           await UserRepository.savePermissions(response.data.permissions);
-          console.log(`[OfflineSync] Pull successful! Cached ${response.data.permissions.length} permissions locally.`);
         }
         // 10. Save Active Business Day (StartDate)
         if (response.data.active_business_day?.startDate) {
           const sDate = response.data.active_business_day.startDate;
           await SettingsRepository.saveActiveBusinessDay(sDate, true, response.data.active_business_day.username);
           await AsyncStorage.setItem('selected_business_date', sDate);
-          console.log(`[OfflineSync] Pull successful! Cached active business day (${sDate}) locally.`);
         }
         // 11. Save License Information
         if (response.data.license) {
           await SettingsRepository.saveLicenseInfo(response.data.license);
           await AsyncStorage.setItem('cached_license_info', JSON.stringify(response.data.license));
-          console.log(`[OfflineSync] Pull successful! Cached license information locally.`);
         }
+        // 12. Save Modifiers
+        if (Array.isArray(response.data.modifiers) && response.data.modifiers.length > 0) {
+          await ModifierRepository.saveModifiers(response.data.modifiers);
+        }
+        // 13. Save Combos
+        if (Array.isArray(response.data.combos) && response.data.combos.length > 0) {
+          await ComboRepository.saveCombos(response.data.combos);
+        }
+        // 14. Save Today's Settlements, Order Details, and Payments for instant offline reports
+        if (Array.isArray(response.data.settlements) && response.data.settlements.length > 0) {
+          await SettlementRepository.bulkSaveSettlements(response.data.settlements);
+        }
+        if (Array.isArray(response.data.order_details) && response.data.order_details.length > 0) {
+          await SettlementRepository.bulkSaveOrderDetails(response.data.order_details);
+        }
+        if (Array.isArray(response.data.payment_details) && response.data.payment_details.length > 0) {
+          await SettlementRepository.bulkSavePaymentDetails(response.data.payment_details);
+        }
+        // 15. Save Today's Attendance
+        if (Array.isArray(response.data.attendance) && response.data.attendance.length > 0) {
+          await AttendanceRepository.bulkSaveAttendance(response.data.attendance);
+        }
+        // 16. Save Cash Drawer Activity Logs
+        if (Array.isArray(response.data.drawer_logs) && response.data.drawer_logs.length > 0) {
+          await CashDrawerRepository.bulkSaveLogs(response.data.drawer_logs);
+        }
+        console.log(`[OfflineSync] Full master data, sales & cash drawer logs cached locally.`);
       }
+
     } catch (err: any) {
       console.warn('[OfflineSync] Master data pull warning:', err.message);
     }
   }, [cleanUrl]);
+
 
   /**
    * Trigger full synchronization cycle (Push + Pull)

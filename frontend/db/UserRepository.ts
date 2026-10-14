@@ -7,8 +7,9 @@ function decodeBase64(str: string): string {
     }
   } catch (_) {}
   try {
-    if (typeof Buffer !== 'undefined') {
-      return Buffer.from(str, 'base64').toString('utf-8');
+    const nodeBuffer = (globalThis as any).Buffer;
+    if (typeof nodeBuffer !== 'undefined') {
+      return nodeBuffer.from(str, 'base64').toString('utf-8');
     }
   } catch (_) {}
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
@@ -27,8 +28,9 @@ function encodeBase64(str: string): string {
     }
   } catch (_) {}
   try {
-    if (typeof Buffer !== 'undefined') {
-      return Buffer.from(str, 'utf-8').toString('base64');
+    const nodeBuffer = (globalThis as any).Buffer;
+    if (typeof nodeBuffer !== 'undefined') {
+      return nodeBuffer.from(str, 'utf-8').toString('base64');
     }
   } catch (_) {}
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';

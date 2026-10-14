@@ -144,6 +144,30 @@ export default class CashDrawerService {
   }
 
   static async saveLog(payload: CashDrawerLogPayload, isSuccess: boolean): Promise<void> {
+    // 1. Always save in local SQLite for offline resilience & local reports
+    try {
+      const { CashDrawerRepository } = require('../db/CashDrawerRepository');
+      await CashDrawerRepository.recordDrawerAction({
+        outletId: payload.outletId,
+        terminalCode: payload.terminalCode,
+        actionType: payload.actionType,
+        amount: payload.amount,
+        tenderedAmount: payload.tenderedAmount,
+        changeAmount: payload.changeAmount,
+        orderId: payload.orderId,
+        reason: payload.reason,
+        remark: payload.remark,
+        openedByUserId: payload.openedByUserId,
+        approvedByUserId: payload.approvedByUserId,
+        openSource: payload.openSource,
+        attachmentUrl: payload.attachmentUrl,
+        isSuccess,
+      });
+    } catch (dbErr) {
+      console.warn('[CashDrawer] Local SQLite save warning:', dbErr);
+    }
+
+    // 2. Push to server if online
     try {
       const token = useAuthStore.getState().token;
       await fetch(`${API_URL}/api/cash-drawer/log`, {
@@ -155,9 +179,10 @@ export default class CashDrawerService {
         body: JSON.stringify({ ...payload, isSuccess }),
       });
     } catch (e) {
-      console.warn('[CashDrawer] Failed to store activity log:', e);
+      console.warn('[CashDrawer] Remote log push queued offline:', e);
     }
   }
+
 
   static async openAndLog(
     payload: CashDrawerLogPayload,
