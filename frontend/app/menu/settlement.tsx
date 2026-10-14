@@ -523,27 +523,68 @@ export default function SettlementScreen() {
 
   const executeDayEnd = async () => {
     setLoading(true);
+    let isSuccess = false;
+    let errorMsg = "";
     try {
-      const res = await API.post("/settlement/day-end", {
-        username: user?.userName || "admin",
-        businessDate: getLocalDateStr(selectedDate)
-      });
-      const data = res.data;
-      if (data.success) {
+      try {
+        const res = await API.post("/settlement/day-end", {
+          username: user?.userName || "admin",
+          businessDate: getLocalDateStr(selectedDate)
+        });
+        const data = res.data;
+        if (data.success) {
+          isSuccess = true;
+        } else {
+          errorMsg = data.error || "Failed to complete Day End.";
+        }
+      } catch (dayEndNetErr: any) {
+        console.warn("⚠️ [Settlement] Server offline during Day End: recording day_end_records locally in SQLite:", dayEndNetErr);
+        try {
+          const { executeQuery } = require("../../db/database");
+          const now = new Date().toISOString();
+          const dateStr = getLocalDateStr(selectedDate) || now.split("T")[0];
+          const snapshot = {
+            totalSales: totalSales || {},
+            payments: payments || [],
+            salesCount: (sales || []).length,
+            closedAt: now
+          };
+          await executeQuery(
+            `INSERT OR REPLACE INTO day_end_records (id, business_date, closed_by, closed_at, summary_json, is_synced)
+             VALUES (?, ?, ?, ?, ?, 0)`,
+            [
+              `dayend_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+              dateStr,
+              user?.userName || "admin",
+              now,
+              JSON.stringify(snapshot)
+            ]
+          );
+          isSuccess = true;
+        } catch (localDbErr: any) {
+          errorMsg = localDbErr.message || "Failed to save offline Day End.";
+        }
+      }
+
+      if (isSuccess) {
         const AsyncStorage = require("@react-native-async-storage/async-storage").default;
         await AsyncStorage.removeItem("selected_business_date");
+        try {
+          const { SettingsRepository } = require("../../db/SettingsRepository");
+          await SettingsRepository.saveActiveBusinessDay(getLocalDateStr(selectedDate), false, user?.userName || "admin");
+        } catch (_) {}
         fetchData();
         showToast({
           type: "success",
-          message: "Day Ended Successfully",
-          subtitle: "Report generated and business day closed."
+          message: "Day Ended Successfully (Offline)",
+          subtitle: "Report generated and business day closed locally."
         });
         router.replace("/(tabs)/category"); // Go back to Category
       } else {
         showToast({
           type: "error",
           message: "Day End Failed",
-          subtitle: data.error || "Failed to complete Day End."
+          subtitle: errorMsg || "Failed to complete Day End."
         });
       }
     } catch (err: any) {
@@ -551,7 +592,7 @@ export default function SettlementScreen() {
       showToast({
         type: "error",
         message: "Day End Failed",
-        subtitle: err.response?.data?.error || err.message || "Failed to connect to the server."
+        subtitle: err.message || "Failed to complete Day End."
       });
     } finally {
       setLoading(false);

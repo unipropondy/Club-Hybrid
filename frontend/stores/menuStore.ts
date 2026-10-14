@@ -56,17 +56,22 @@ export const useMenuStore = create<MenuState>((set, get) => ({
         new Map(allDishesRaw.map((d: any) => [d.DishId || d.id, d])).values()
       );
 
-      // 🛡️ Cache dishes into local SQLite for offline waiter tablet access
+      // 🛡️ Cache kitchens, dish groups, and dishes into local SQLite for offline waiter tablet access
       try {
         const { MenuRepository } = require('../db/MenuRepository');
+        MenuRepository.saveKitchenCategories(kitchensData).catch(() => {});
+
         const cacheItems = allDishesData.map((d: any) => ({
           dish_id: d.DishId || d.id,
           dish_name: d.Name || d.dish_name || '',
           category_id: d.DishGroupId || d.categoryId || '',
           category_name: d.DishGroupName || d.categoryName || '',
+          kitchen_id: d.KitchenTypeId || d.CategoryId || '',
+          kitchen_name: d.KitchenTypeName || '',
           price: Number(d.currentcost || d.Cost || d.price || 0),
-          is_available: d.IsActive !== false,
+          is_available: d.IsActive !== false && d.IsActive !== 0,
           image_url: d.Imageid || d.imageUrl || '',
+          sort_code: Number(d.SordCode || d.sort_code || 0),
           updated_at: new Date().toISOString(),
         }));
         MenuRepository.saveMenuDishes(cacheItems).catch((err: any) =>
@@ -86,9 +91,10 @@ export const useMenuStore = create<MenuState>((set, get) => ({
       console.warn("Failed to fetch online menu, falling back to local SQLite cache:", error);
       try {
         const { MenuRepository } = require('../db/MenuRepository');
+        const cachedKitchens = await MenuRepository.getCachedKitchens();
         const cached = await MenuRepository.getCachedMenu();
         if (cached && cached.length > 0) {
-          console.log(`📦 [MenuStore] Restored ${cached.length} dishes from SQLite cache for offline usage.`);
+          console.log(`📦 [MenuStore] Restored ${cached.length} active dishes from SQLite cache for offline usage.`);
           const mappedDishes = cached.map((c: any) => ({
             DishId: c.dish_id,
             Name: c.dish_name,
@@ -96,17 +102,22 @@ export const useMenuStore = create<MenuState>((set, get) => ({
             DishGroupName: c.category_name,
             currentcost: c.price,
             Cost: c.price,
+            Price: c.price,
             IsActive: c.is_available,
             Imageid: c.image_url,
+            KitchenTypeName: c.kitchen_name,
+            SordCode: c.sort_code,
           }));
 
-          const uniqueCategories = Array.from(new Set(cached.map((c: any) => c.category_name || 'General'))).map((catName, idx) => ({
-            CategoryId: `offline-cat-${idx}`,
-            KitchenTypeName: catName,
-          }));
+          const kitchensToUse = (cachedKitchens && cachedKitchens.length > 0)
+            ? cachedKitchens
+            : Array.from(new Set(cached.map((c: any) => c.kitchen_name || c.category_name || 'General'))).map((catName, idx) => ({
+                CategoryId: `offline-cat-${idx}`,
+                KitchenTypeName: catName,
+              }));
 
           set({
-            kitchens: uniqueCategories,
+            kitchens: kitchensToUse,
             allDishes: mappedDishes,
             isLoading: false,
           });
@@ -132,13 +143,30 @@ export const useMenuStore = create<MenuState>((set, get) => ({
         new Map(rawGroups.map((g: any) => [g.DishGroupId || g.id, g])).values()
       );
       
+      // Cache groups locally in SQLite
+      try {
+        const { MenuRepository } = require('../db/MenuRepository');
+        MenuRepository.saveDishGroups(groups, kitchenId).catch(() => {});
+      } catch (_) {}
+
       set((state) => ({
         dishGroups: { ...state.dishGroups, [kitchenId]: groups }
       }));
       return groups;
     } catch (error) {
       console.warn(`Failed to fetch groups for kitchen ${kitchenId}, checking local cache:`, error);
-      const allDishes = get().allDishes || [];
+      try {
+        const { MenuRepository } = require('../db/MenuRepository');
+        const cachedGroups = await MenuRepository.getCachedDishGroups(kitchenId);
+        if (cachedGroups && cachedGroups.length > 0) {
+          set((state) => ({
+            dishGroups: { ...state.dishGroups, [kitchenId]: cachedGroups }
+          }));
+          return cachedGroups;
+        }
+      } catch (_) {}
+
+      const allDishes = (get().allDishes || []).filter((d: any) => d.IsActive !== false && d.IsActive !== 0);
       const distinctGroups = Array.from(
         new Set(allDishes.map((d: any) => d.DishGroupId || d.categoryId).filter(Boolean))
       ).map((gid) => {
@@ -192,7 +220,7 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     } catch (error) {
       console.warn(`Failed to fetch dishes for group ${groupId}, checking local cache:`, error);
       const fallbackDishes = (get().allDishes || []).filter(
-        (d: any) => String(d.DishGroupId || d.categoryId) === String(groupId)
+        (d: any) => String(d.DishGroupId || d.categoryId) === String(groupId) && d.IsActive !== false && d.IsActive !== 0
       );
       if (fallbackDishes.length > 0) {
         set((state) => ({

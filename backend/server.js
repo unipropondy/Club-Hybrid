@@ -268,6 +268,26 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
   immutable: true
 }));
 
+// 📝 System Request & Activity Logger (Persisted to logs/system.log)
+const SYSTEM_LOGS_DIR = path.resolve(__dirname, "../logs");
+if (!fs.existsSync(SYSTEM_LOGS_DIR)) {
+  fs.mkdirSync(SYSTEM_LOGS_DIR, { recursive: true });
+}
+const SYSTEM_LOG_FILE = path.join(SYSTEM_LOGS_DIR, "system.log");
+const BACKEND_LOG_STREAM = fs.createWriteStream(SYSTEM_LOG_FILE, { flags: "a" });
+
+app.use((req, res, next) => {
+  const start = Date.now();
+  const timestamp = new Date().toISOString();
+
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    const logLine = `[${timestamp}] [BACKEND] ${req.method} ${req.originalUrl || req.url} | Status: ${res.statusCode} | ${duration}ms\n`;
+    BACKEND_LOG_STREAM.write(logLine);
+  });
+  next();
+});
+
 // 🔄 Database Connection Check (for all API routes)
 app.use("/api", dbCheck);
 app.use("/api", idempotencyMiddleware);

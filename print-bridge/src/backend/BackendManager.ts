@@ -123,12 +123,18 @@ export async function startBackendProcess(): Promise<void> {
 
     backendProcess.stdout?.on('data', (data) => {
       const msg = data.toString().trim();
-      if (msg) logger.info(`[Backend] ${msg}`);
+      if (msg) {
+        logger.backend(msg);
+        logger.info(`[Backend] ${msg}`);
+      }
     });
 
     backendProcess.stderr?.on('data', (data) => {
       const msg = data.toString().trim();
-      if (msg) logger.warn(`[Backend Error] ${msg}`);
+      if (msg) {
+        logger.backend(`[ERROR] ${msg}`);
+        logger.warn(`[Backend Error] ${msg}`);
+      }
     });
 
     backendProcess.on('error', (err) => {

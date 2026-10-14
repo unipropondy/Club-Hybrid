@@ -73,18 +73,23 @@ export function useOfflineSync(backendUrl: string) {
     const unsyncedAlterations = await SettlementRepository.getPendingAlterations();
     const unsyncedAttendance = await AttendanceRepository.getUnsyncedAttendance();
     const unsyncedDrawerLogs = await CashDrawerRepository.getUnsyncedLogs();
+    
+    // Fetch pending day-end records
+    const { executeQuery } = require('../db/database');
+    const unsyncedDayEnds = await executeQuery(`SELECT * FROM day_end_records WHERE is_synced = 0`);
 
     if (
       unsyncedBatch.length === 0 &&
       unsyncedAlterations.length === 0 &&
       unsyncedAttendance.length === 0 &&
-      unsyncedDrawerLogs.length === 0
+      unsyncedDrawerLogs.length === 0 &&
+      unsyncedDayEnds.length === 0
     ) {
       return 0;
     }
 
     console.log(
-      `[OfflineSync] Pushing ${unsyncedBatch.length} orders, ${unsyncedAlterations.length} alterations, ${unsyncedAttendance.length} attendance punches, ${unsyncedDrawerLogs.length} drawer logs...`
+      `[OfflineSync] Pushing ${unsyncedBatch.length} orders, ${unsyncedAlterations.length} alterations, ${unsyncedAttendance.length} attendance punches, ${unsyncedDrawerLogs.length} drawer logs, ${unsyncedDayEnds.length} day-ends...`
     );
 
     const response = await axios.post(
@@ -94,6 +99,7 @@ export function useOfflineSync(backendUrl: string) {
         alterations: unsyncedAlterations,
         attendance: unsyncedAttendance,
         drawer_logs: unsyncedDrawerLogs,
+        day_end_records: unsyncedDayEnds,
       },
       { timeout: 15000 }
     );
@@ -119,11 +125,21 @@ export function useOfflineSync(backendUrl: string) {
         await CashDrawerRepository.markLogsSynced(syncedDrawerIds);
       }
 
+      const syncedDayEndIds = response.data.synced_day_end_ids || [];
+      if (syncedDayEndIds.length > 0) {
+        const placeholders = syncedDayEndIds.map(() => '?').join(',');
+        await executeQuery(
+          `UPDATE day_end_records SET is_synced = 1 WHERE id IN (${placeholders})`,
+          syncedDayEndIds
+        );
+      }
+
       const totalSynced =
         syncedIds.length +
         syncedAltIds.length +
         syncedAttIds.length +
-        syncedDrawerIds.length;
+        syncedDrawerIds.length +
+        syncedDayEndIds.length;
       console.log(`[OfflineSync] Push successful! Synced ${totalSynced} items.`);
       return totalSynced;
     } else {
@@ -143,6 +159,14 @@ export function useOfflineSync(backendUrl: string) {
         // 1. Save Dishes
         if (Array.isArray(response.data.dishes) && response.data.dishes.length > 0) {
           await MenuRepository.saveMenuDishes(response.data.dishes);
+        }
+        // 1.1 Save Kitchen Categories (CategoryMaster)
+        if (Array.isArray(response.data.categories) && response.data.categories.length > 0) {
+          await MenuRepository.saveKitchenCategories(response.data.categories);
+        }
+        // 1.2 Save Dish Groups (DishGroupMaster)
+        if (Array.isArray(response.data.dish_groups) && response.data.dish_groups.length > 0) {
+          await MenuRepository.saveDishGroups(response.data.dish_groups);
         }
         // 2. Save Tables
         if (Array.isArray(response.data.tables) && response.data.tables.length > 0) {

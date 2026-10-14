@@ -492,11 +492,47 @@ export default function LoginScreen() {
         }
         return;
       } else {
-        // If server responded with error (e.g. 401), also check offline SQLite cache
+        // If server responded with error (e.g. 401 Invalid Credentials):
+        // On Android tablet (APK), also check offline SQLite cache for offline roaming
+        if (Platform.OS !== "web") {
+          const offlineResult = await UserRepository.authenticateOffline(userName.trim(), password);
+          if (offlineResult.success && offlineResult.user) {
+            setUser(offlineResult.user, offlineResult.token);
+            setPermissions(offlineResult.permissions || {});
+            const role = offlineResult.user.role;
+            if (offlineResult.user.userGroupId === "DFCF23EE-F6F4-4885-8D26-0056C657595F") {
+              router.replace("/sales-report");
+            } else if (role === "KDS") {
+              router.replace("/(tabs)/kds" as any);
+            } else {
+              router.replace("/(tabs)/category");
+            }
+            return;
+          }
+        }
+
+        setError(data.message || "Invalid User ID or Password.");
+        shakeError();
+      }
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      console.log("[Login] Server unreachable, error:", err.message);
+
+      // ── APK ONLY: OFFLINE SQLITE LOGIN FALLBACK ──
+      if (Platform.OS !== "web") {
         const offlineResult = await UserRepository.authenticateOffline(userName.trim(), password);
         if (offlineResult.success && offlineResult.user) {
           setUser(offlineResult.user, offlineResult.token);
           setPermissions(offlineResult.permissions || {});
+
+          try {
+            if (rememberMe) {
+              await AsyncStorage.setItem("remembered_creds", JSON.stringify({ u: userName.trim(), p: password }));
+            } else {
+              await AsyncStorage.removeItem("remembered_creds");
+            }
+          } catch (e) {}
+
           const role = offlineResult.user.role;
           if (offlineResult.user.userGroupId === "DFCF23EE-F6F4-4885-8D26-0056C657595F") {
             router.replace("/sales-report");
@@ -506,39 +542,13 @@ export default function LoginScreen() {
             router.replace("/(tabs)/category");
           }
           return;
-        }
-
-        setError(data.message || "Login failed. Please try again.");
-        shakeError();
-      }
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      console.log("[Login] Server unreachable, trying offline SQLite cache fallback...");
-
-      // ── 100% OFFLINE SQLITE LOGIN FALLBACK ──
-      const offlineResult = await UserRepository.authenticateOffline(userName.trim(), password);
-      if (offlineResult.success && offlineResult.user) {
-        setUser(offlineResult.user, offlineResult.token);
-        setPermissions(offlineResult.permissions || {});
-
-        try {
-          if (rememberMe) {
-            await AsyncStorage.setItem("remembered_creds", JSON.stringify({ u: userName.trim(), p: password }));
-          } else {
-            await AsyncStorage.removeItem("remembered_creds");
-          }
-        } catch (e) {}
-
-        const role = offlineResult.user.role;
-        if (offlineResult.user.userGroupId === "DFCF23EE-F6F4-4885-8D26-0056C657595F") {
-          router.replace("/sales-report");
-        } else if (role === "KDS") {
-          router.replace("/(tabs)/kds" as any);
         } else {
-          router.replace("/(tabs)/category");
+          setError(offlineResult.message || "Cannot connect to Counter server. Please check Wi-Fi & IP.");
+          shakeError();
         }
       } else {
-        setError(offlineResult.message || "Cannot connect to Counter server. Check Wi-Fi & IP.");
+        // Desktop Counter POS (EXE / Web): Speaks directly to Local Server
+        setError(`Unable to connect to local backend at ${activeApi}. Ensure local service is running.`);
         shakeError();
       }
     } finally {

@@ -56,6 +56,14 @@ API.interceptors.response.use(
           `🛑 [API Retry Exhausted] ${config.method?.toUpperCase()} ${config.url} failed after ${MAX_RETRIES} retries.`
         );
       }
+      try {
+        const { SystemLogger } = require('./db/SystemLogger');
+        SystemLogger.error('NETWORK_API', `${config.method?.toUpperCase()} ${config.url} failed`, {
+          status: error.response?.status,
+          message: error.message,
+          data: error.response?.data
+        });
+      } catch (_) {}
       return Promise.reject(error);
     }
 

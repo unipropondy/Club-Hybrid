@@ -22,6 +22,10 @@ const getLocalBackendIP = (): string => {
 export const localIP = getLocalBackendIP();
 
 const calculateInitialUrl = (): string => {
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    return `${window.location.protocol}//${window.location.hostname}${window.location.port ? `:${window.location.port}` : ""}`;
+  }
+
   if (__DEV__) {
     return `http://${localIP}:5000`;
   }
@@ -33,10 +37,6 @@ const calculateInitialUrl = (): string => {
       envUrl = `http://${envUrl}`;
     }
     return envUrl;
-  }
-
-  if (Platform.OS === "web" && typeof window !== "undefined") {
-    return `${window.location.protocol}//${window.location.hostname}${window.location.port ? `:${window.location.port}` : ""}`;
   }
 
   return "https://club-hybrid-production.up.railway.app";

@@ -385,7 +385,7 @@ electronApp.whenReady().then(async () => {
   await startBackendProcess();
 
   // Launch the Express listener + poller
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     logger.info(`UniPro Print Bridge & POS Hub listening locally on port ${config.port}`);
     startPoller();
 
@@ -415,6 +415,19 @@ electronApp.whenReady().then(async () => {
         closeCustomerDisplay();
       }
     });
+  });
+
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.warn('[Server] Port is already in use by another instance. Proceeding with UI launch...');
+      initTray();
+      launchCounterPOSWindow();
+      if (getSecondaryDisplay()) {
+        launchCustomerDisplay();
+      }
+    } else {
+      logger.error('[Server] Uncaught listener error:', err);
+    }
   });
 
   // Windows Startup Registry Configuration

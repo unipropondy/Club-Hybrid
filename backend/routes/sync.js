@@ -18,14 +18,15 @@ const IS_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
  * Guarantees transactional idempotency using client_id and ClientOrderID.
  */
 router.post("/push", async (req, res) => {
-  const { batch, alterations, attendance, drawer_logs } = req.body;
+  const { batch, alterations, attendance, drawer_logs, day_end_records } = req.body;
 
   const hasOrders = Array.isArray(batch) && batch.length > 0;
   const hasAlt = Array.isArray(alterations) && alterations.length > 0;
   const hasAtt = Array.isArray(attendance) && attendance.length > 0;
   const hasDrawer = Array.isArray(drawer_logs) && drawer_logs.length > 0;
+  const hasDayEnd = Array.isArray(day_end_records) && day_end_records.length > 0;
 
-  if (!hasOrders && !hasAlt && !hasAtt && !hasDrawer) {
+  if (!hasOrders && !hasAlt && !hasAtt && !hasDrawer && !hasDayEnd) {
     return res.json({
       success: true,
       processed_count: 0,
@@ -33,6 +34,7 @@ router.post("/push", async (req, res) => {
       synced_alteration_ids: [],
       synced_attendance_ids: [],
       synced_drawer_ids: [],
+      synced_day_end_ids: [],
     });
   }
 
@@ -63,18 +65,39 @@ router.post("/push", async (req, res) => {
       const clientId = String(order.client_id).trim();
       const orderGuid = IS_UUID_REGEX.test(clientId) ? clientId : crypto.randomUUID();
 
-      // 1. Idempotency Check: Verify if ClientOrderID or OrderNumber already exists
+      // 1. Idempotency Check: Concurrency-safe check (NO unsafe dirty-read NOLOCK)
+      // For settled sales, verify that BOTH the order AND the settlement records exist.
+      const isPaid = order.payment_status === "PAID" || order.status === "COMPLETED";
       const checkReq = new sql.Request(transaction);
       checkReq.input("clientId", sql.VarChar(100), clientId);
       const existing = await checkReq.query(`
-        SELECT TOP 1 OrderId FROM RestaurantOrderCur WITH (NOLOCK)
+        SELECT TOP 1 OrderId, isOrderClosed FROM RestaurantOrderCur WITH (UPDLOCK, ROWLOCK)
         WHERE ClientOrderID = @clientId OR OrderNumber = @clientId
       `);
 
       if (existing.recordset.length > 0) {
-        // Already processed, mark as synced idempotently
-        syncedClientIds.push(clientId);
-        continue;
+        // If it's a paid order, verify whether SettlementHeader exists before acknowledging as completely synced
+        if (isPaid) {
+          const checkSetReq = new sql.Request(transaction);
+          checkSetReq.input("clientId", sql.VarChar(100), clientId);
+          checkSetReq.input("orderGuid", sql.UniqueIdentifier, orderGuid);
+          const existingSet = await checkSetReq.query(`
+            SELECT TOP 1 SettlementID FROM SettlementHeader WITH (UPDLOCK, ROWLOCK)
+            WHERE SettlementID = @orderGuid OR BillNo = @clientId
+          `);
+
+          if (existingSet.recordset.length > 0) {
+            // Both order and settlement exist, safely acknowledge
+            syncedClientIds.push(clientId);
+            continue;
+          }
+          // If order exists but settlement is missing, do NOT skip! Fall through to repair/insert settlement and payment details.
+          console.warn(`[Sync Push] Order ${clientId} found but missing SettlementHeader. Repairing settlement records...`);
+        } else {
+          // Unpaid order already exists, acknowledge idempotently
+          syncedClientIds.push(clientId);
+          continue;
+        }
       }
 
       // Safe column values strictly truncated to schema bounds
@@ -98,20 +121,22 @@ router.post("/push", async (req, res) => {
       headerReq.input("startDate", sql.Date, activeStartDate);
 
       await headerReq.query(`
-        INSERT INTO RestaurantOrderCur (
-          OrderId, OrderNumber, Tableno, CustomerName, TotalAmount,
-          StatusCode, isOrderClosed, CreatedOn, ModifiedOn, OrderDateTime,
-          ClientOrderID, BusinessUnitId, CreatedBy, PriorityCode, IsTakeAway, Pax, start_date
-        ) VALUES (
-          @orderId, @orderNo, @tableNo, @customerName, @total,
-          1, @isClosed, @createdAt, GETDATE(), @createdAt,
-          @clientId, @bizId, @userId, 1, 0, 1, @startDate
-        )
+        IF NOT EXISTS (SELECT 1 FROM RestaurantOrderCur WITH (UPDLOCK, ROWLOCK) WHERE OrderId = @orderId OR ClientOrderID = @clientId)
+        BEGIN
+          INSERT INTO RestaurantOrderCur (
+            OrderId, OrderNumber, Tableno, CustomerName, TotalAmount,
+            StatusCode, isOrderClosed, CreatedOn, ModifiedOn, OrderDateTime,
+            ClientOrderID, BusinessUnitId, CreatedBy, PriorityCode, IsTakeAway, Pax, start_date
+          ) VALUES (
+            @orderId, @orderNo, @tableNo, @customerName, @total,
+            1, @isClosed, @createdAt, GETDATE(), @createdAt,
+            @clientId, @bizId, @userId, 1, 0, 1, @startDate
+          );
+        END
       `);
 
       // 2.5 Update TableMaster and handle offline settlement
       const cleanTableNo = safeTableNo.replace(/^Table\s*/i, '').trim();
-      const isPaid = order.payment_status === "PAID" || order.status === "COMPLETED";
 
       if (cleanTableNo && !safeTableNo.startsWith("TW")) {
         const tableReq = new sql.Request(transaction);
@@ -477,8 +502,40 @@ router.post("/push", async (req, res) => {
       }
     }
 
+    // Process Day End Records
+    const syncedDayEndIds = [];
+    if (Array.isArray(day_end_records) && day_end_records.length > 0) {
+      for (const der of day_end_records) {
+        try {
+          const bDate = der.business_date;
+          const closedBy = der.closed_by || "admin";
+          const closedAt = der.closed_at ? new Date(der.closed_at) : new Date();
+
+          await transaction.request()
+            .input("bDate", sql.Date, bDate)
+            .input("closedBy", sql.VarChar(30), closedBy)
+            .input("closedAt", sql.DateTime, closedAt)
+            .query(`
+              IF EXISTS (SELECT 1 FROM BusinessDayLog WHERE BusinessDate = @bDate)
+                UPDATE BusinessDayLog 
+                SET EndedAt = @closedAt, EndedBy = @closedBy 
+                WHERE BusinessDate = @bDate
+              ELSE
+                INSERT INTO BusinessDayLog (BusinessDate, StartedAt, StartedBy, EndedAt, EndedBy)
+                VALUES (@bDate, @closedAt, @closedBy, @closedAt, @closedBy);
+
+              INSERT INTO BusinessDayAuditLog (BusinessDate, EventType, EventTime, ActionBy)
+              VALUES (@bDate, 'DAY_END_OFFLINE_SYNC', @closedAt, @closedBy);
+            `);
+          syncedDayEndIds.push(der.id);
+        } catch (deErr) {
+          console.warn("⚠️ Day end sync warning:", deErr.message);
+        }
+      }
+    }
+
     await transaction.commit();
-    console.log(`☁️ [TabletSync] Push succeeded. Orders: ${syncedClientIds.length}, Alterations: ${syncedAlterationIds.length}, Attendance: ${syncedAttendanceIds.length}, Drawer Logs: ${syncedDrawerIds.length}`);
+    console.log(`☁️ [TabletSync] Push succeeded. Orders: ${syncedClientIds.length}, Alterations: ${syncedAlterationIds.length}, Attendance: ${syncedAttendanceIds.length}, Drawer Logs: ${syncedDrawerIds.length}, Day End: ${syncedDayEndIds.length}`);
 
     // Broadcast update to all active POS / KDS screens via Socket.io
     const io = req.app.get("io");
@@ -507,6 +564,7 @@ router.post("/push", async (req, res) => {
       synced_alteration_ids: syncedAlterationIds,
       synced_attendance_ids: syncedAttendanceIds,
       synced_drawer_ids: syncedDrawerIds,
+      synced_day_end_ids: syncedDayEndIds,
     });
   } catch (error) {
     if (transaction) {
@@ -545,7 +603,6 @@ router.get("/pull", async (req, res) => {
       FROM DishMaster d WITH (NOLOCK)
       LEFT JOIN DishGroupMaster g WITH (NOLOCK) ON d.DishGroupId = g.DishGroupId
     `;
-
     const dishReq = pool.request();
     if (since) {
       dishReq.input("sinceDate", sql.VarChar, since);
@@ -555,7 +612,39 @@ router.get("/pull", async (req, res) => {
 
     const dishResult = await dishReq.query(dishQuery);
 
-    // 2. Fetch Tables
+    // 1.1 Fetch Kitchens / Categories
+    let categoriesData = [];
+    try {
+      const catRes = await pool.request().query(`
+        SELECT cm.CategoryId, cm.CategoryName AS KitchenTypeName, ckt.KitchenTypeCode, cm.SortCode, cm.IsActive
+        FROM CategoryMaster cm WITH (NOLOCK)
+        LEFT JOIN CategoryKitchenType ckt WITH (NOLOCK) ON cm.CategoryId = ckt.CategoryId
+        WHERE cm.IsActive = 1
+        ORDER BY cm.SortCode ASC, cm.CategoryName ASC
+      `);
+      categoriesData = catRes.recordset || [];
+    } catch (catErr) {
+      console.warn("⚠️ [TabletSync Pull] Categories fetch warning:", catErr.message);
+    }
+
+    // 1.2 Fetch Dish Groups
+    let dishGroupsData = [];
+    try {
+      const dgRes = await pool.request().query(`
+        SELECT 
+          dgm.DishGroupId,
+          dgm.DishGroupName,
+          dgm.CategoryId,
+          dgm.SortCode,
+          dgm.IsActive
+        FROM DishGroupMaster dgm WITH (NOLOCK)
+        WHERE dgm.IsActive = 1
+        ORDER BY dgm.SortCode ASC, dgm.DishGroupName ASC
+      `);
+      dishGroupsData = dgRes.recordset || [];
+    } catch (dgErr) {
+      console.warn("⚠️ [TabletSync Pull] Dish groups fetch warning:", dgErr.message);
+    }
     let tablesData = [];
     try {
       const tableRes = await pool.request().query(`
@@ -947,6 +1036,8 @@ router.get("/pull", async (req, res) => {
       success: true,
       timestamp: new Date().toISOString(),
       dishes: dishResult.recordset || [],
+      categories: categoriesData,
+      dish_groups: dishGroupsData,
       tables: tablesData,
       paymodes: paymodesData,
       members: membersData,

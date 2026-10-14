@@ -1865,10 +1865,10 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
               : `${formatSectionGlobal(orderContext.section || "")} - T${orderContext.tableNo}`}
           </Text>
           {orderContext.tableId &&
-            (currentTableOrderId || activeOrder?.orderId || tableData?.orderId) &&
+            (currentTableOrderId || activeOrder?.orderId || tableData?.orderId) && (currentTableOrderId || activeOrder?.orderId || tableData?.orderId) !== 'EMPTY' &&
             (cart.length > 0 || currentTableStatus !== "EMPTY") && (
               <Text style={styles.orderIdLabel}>
-                Order ID: {currentTableOrderId || activeOrder?.orderId || tableData?.orderId}
+                Order ID: {((currentTableOrderId || activeOrder?.orderId || tableData?.orderId) === 'EMPTY' || !(currentTableOrderId || activeOrder?.orderId || tableData?.orderId)) ? '' : (currentTableOrderId || activeOrder?.orderId || tableData?.orderId)}
               </Text>
             )}
         </View>

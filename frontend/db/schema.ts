@@ -49,11 +49,39 @@ CREATE TABLE IF NOT EXISTS menu_cache (
   dish_name TEXT NOT NULL,
   category_id TEXT NOT NULL,
   category_name TEXT NOT NULL,
+  kitchen_id TEXT,
+  kitchen_name TEXT,
   price REAL NOT NULL DEFAULT 0,
   is_available INTEGER NOT NULL DEFAULT 1,
   image_url TEXT,
+  sort_code INTEGER DEFAULT 0,
   updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_menu_cat ON menu_cache(category_id);
+CREATE INDEX IF NOT EXISTS idx_menu_kitchen ON menu_cache(kitchen_id);
+CREATE INDEX IF NOT EXISTS idx_menu_avail ON menu_cache(is_available);
+
+CREATE TABLE IF NOT EXISTS categories_cache (
+  category_id TEXT PRIMARY KEY NOT NULL,
+  category_name TEXT NOT NULL,
+  kitchen_type_code TEXT,
+  sort_code INTEGER DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dishgroups_cache (
+  group_id TEXT PRIMARY KEY NOT NULL,
+  group_name TEXT NOT NULL,
+  category_id TEXT,
+  kitchen_type_name TEXT,
+  sort_code INTEGER DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dg_cat ON dishgroups_cache(category_id);
 
 CREATE TABLE IF NOT EXISTS sync_queue (
   id TEXT PRIMARY KEY NOT NULL,
@@ -416,6 +444,17 @@ CREATE TABLE IF NOT EXISTS day_end_records (
   summary_json TEXT NOT NULL,
   is_synced INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS system_logs (
+  id TEXT PRIMARY KEY NOT NULL,
+  level TEXT NOT NULL,
+  category TEXT NOT NULL,
+  message TEXT NOT NULL,
+  details TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sys_logs_created ON system_logs(created_at);
 `;
 
 

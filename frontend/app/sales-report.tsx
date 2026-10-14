@@ -312,10 +312,14 @@ export default function SalesReport() {
   }, []);
 
   useEffect(() => {
-    if (activeBusinessDate) {
-      setSelectedDate(activeBusinessDate);
+    if (activeBusinessDate && selectedFilter !== "CUSTOM") {
+      // Only default to active business date if filter is DAILY and no custom selection is active
+      setSelectedDate((prev) => {
+        if (!prev || prev === todayDate) return activeBusinessDate;
+        return prev;
+      });
     }
-  }, [activeBusinessDate]);
+  }, [activeBusinessDate, selectedFilter]);
 
   useEffect(() => {
     const saveState = async () => {
@@ -688,7 +692,7 @@ export default function SalesReport() {
         const data = await res.json();
         if (data.success && data.active && data.startDate) {
           setActiveBusinessDate(data.startDate);
-          if (selectedDate === todayDate && selectedDate !== data.startDate) {
+          if (selectedFilter !== "CUSTOM" && !rangeStart && selectedDate === todayDate && selectedDate !== data.startDate) {
             setSelectedDate(data.startDate);
             return;
           }

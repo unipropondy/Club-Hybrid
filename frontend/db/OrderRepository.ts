@@ -157,12 +157,28 @@ export class OrderRepository {
         params: clientIds,
       },
       {
+        sql: `UPDATE settlement_header SET is_synced = 1 WHERE settlement_id IN (${placeholders})`,
+        params: clientIds,
+      },
+      {
+        sql: `UPDATE restaurant_invoice SET is_synced = 1 WHERE invoice_id IN (${placeholders}) OR order_id IN (${placeholders})`,
+        params: [...clientIds, ...clientIds],
+      },
+      {
+        sql: `UPDATE restaurant_order SET is_synced = 1 WHERE order_id IN (${placeholders})`,
+        params: clientIds,
+      },
+      {
+        sql: `UPDATE payment_detail SET is_synced = 1 WHERE settlement_id IN (${placeholders})`,
+        params: clientIds,
+      },
+      {
         sql: `DELETE FROM sync_queue WHERE client_id IN (${placeholders}) AND entity_type = 'ORDER'`,
         params: clientIds,
       },
     ]);
 
-    console.log(`[OrderRepository] Marked ${clientIds.length} orders as synced.`);
+    console.log(`[OrderRepository] Marked ${clientIds.length} orders & settlements as synced.`);
   }
 
   /**

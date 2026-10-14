@@ -29,7 +29,7 @@
     "appId": "com.unipro.poscounter",
     "productName": "UniPro POS Counter",
     "directories": {
-      "output": "dist-installer"
+      "output": "dist-installer-release"
     },
     "files": [
       "dist/**/*",

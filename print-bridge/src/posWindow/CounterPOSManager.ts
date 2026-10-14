@@ -105,6 +105,12 @@ export function launchCounterPOSWindow(): BrowserWindow {
     }
   });
 
+  // 📝 Capture all Frontend UI console output into frontend.log
+  counterPOSWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const levelStr = level === 3 ? 'ERROR' : level === 2 ? 'WARN' : 'INFO';
+    logger.frontend(`[${levelStr}] [${sourceId || 'UI'}:${line}] ${message}`);
+  });
+
   // Enterprise POS Keyboard Shortcuts
   counterPOSWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type === 'keyDown') {

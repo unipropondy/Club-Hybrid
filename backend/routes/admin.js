@@ -82,4 +82,20 @@ router.get("/db-diagnostics", async (req, res) => {
   }
 });
 
+router.post("/client-logs", async (req, res) => {
+  try {
+    const { logs } = req.body;
+    if (Array.isArray(logs) && logs.length > 0) {
+      const fs = require("fs");
+      const path = require("path");
+      const logFile = path.resolve(__dirname, "../../logs/system.log");
+      const lines = logs.map(l => `[${l.timestamp || new Date().toISOString()}] [FRONTEND] [${l.level || 'INFO'}] [${l.category || 'APP'}] ${l.message} ${l.details ? JSON.stringify(l.details) : ''}\n`).join("");
+      fs.appendFileSync(logFile, lines);
+    }
+    res.json({ success: true, count: Array.isArray(logs) ? logs.length : 0 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
