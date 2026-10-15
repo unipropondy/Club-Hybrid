@@ -895,11 +895,28 @@ export default function SalesReport() {
       clearTimeout(timer);
       if (!response.ok) throw new Error("Failed to fetch sales");
       const data = await response.json();
-      if (Array.isArray(data)) {
-        setSales(data);
-      } else {
-        setSales([]);
+      let serverSales = Array.isArray(data) ? data : [];
+
+      // 🔄 MERGE OFFLINE PENDING SALES: ensure local SQLite orders waiting to push are displayed immediately
+      try {
+        const { SettlementRepository } = require("../db/SettlementRepository");
+        const localSettlements = await SettlementRepository.getSettlementsByRange(startStr, endStr);
+        if (Array.isArray(localSettlements) && localSettlements.length > 0) {
+          const serverBillNos = new Set(
+            serverSales.map((s: any) => String(s.BillNo || s.OrderNumber || s.SettlementID || "").trim())
+          );
+          const pendingUnsynced = localSettlements.filter(
+            (ls: any) => !serverBillNos.has(String(ls.BillNo || ls.OrderNumber || ls.SettlementID || "").trim())
+          );
+          if (pendingUnsynced.length > 0) {
+            serverSales = [...pendingUnsynced, ...serverSales];
+          }
+        }
+      } catch (localMergeErr) {
+        console.warn("Could not merge local offline sales:", localMergeErr);
       }
+
+      setSales(serverSales);
     } catch (error) {
       console.log("ℹ️ [SalesReport] Offline: restoring local sales from SQLite settlement_header...");
       try {

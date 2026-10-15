@@ -113,6 +113,110 @@ export default function GeneralSettingsScreen() {
   const [syncingPush, setSyncingPush] = useState(false);
   const [syncingPull, setSyncingPull] = useState(false);
 
+  // Tablet Local SQLite Queue States
+  const [tabletQueueCount, setTabletQueueCount] = useState<number>(0);
+  const [tabletSyncing, setTabletSyncing] = useState<boolean>(false);
+
+  const fetchTabletQueueCount = async () => {
+    try {
+      const { SyncQueueRepository, OrderRepository } = require("../db");
+      const [qCount, unsyncedOrders] = await Promise.all([
+        SyncQueueRepository.getQueueCount().catch(() => 0),
+        OrderRepository.getUnsyncedOrders().catch(() => []),
+      ]);
+      const totalPending = Math.max(Number(qCount || 0), Number(unsyncedOrders?.length || 0));
+      setTabletQueueCount(totalPending);
+    } catch (err) {
+      console.warn("Could not fetch tablet SQLite queue count:", err);
+    }
+  };
+
+  const handleTabletManualPush = async () => {
+    setTabletSyncing(true);
+    try {
+      const { OrderRepository, SettlementRepository, AttendanceRepository, CashDrawerRepository, SyncQueueRepository } = require("../db");
+      const { executeQuery } = require("../db/database");
+      const axios = require("axios").default || require("axios");
+
+      const unsyncedBatch = await OrderRepository.getUnsyncedOrders();
+      const unsyncedAlterations = await SettlementRepository.getPendingAlterations();
+      const unsyncedAttendance = await AttendanceRepository.getUnsyncedAttendance();
+      const unsyncedDrawerLogs = await CashDrawerRepository.getUnsyncedLogs();
+      const unsyncedDayEnds = await executeQuery(`SELECT * FROM day_end_records WHERE is_synced = 0`).catch(() => []);
+
+      const totalItems = unsyncedBatch.length + unsyncedAlterations.length + unsyncedAttendance.length + unsyncedDrawerLogs.length + unsyncedDayEnds.length;
+      if (totalItems === 0) {
+        showToast({
+          type: "success",
+          message: "All Caught Up!",
+          subtitle: "No pending offline orders on this tablet.",
+        });
+        setTabletQueueCount(0);
+        return;
+      }
+
+      const cleanApi = (API_URL || "").trim().replace(/\/+$/, "");
+      const res = await axios.post(
+        `${cleanApi}/api/sync/push`,
+        {
+          batch: unsyncedBatch,
+          alterations: unsyncedAlterations,
+          attendance: unsyncedAttendance,
+          drawer_logs: unsyncedDrawerLogs,
+          day_end_records: unsyncedDayEnds,
+        },
+        { timeout: 20000 }
+      );
+
+      if (res.data?.success) {
+        const syncedIds = res.data.synced_client_ids || [];
+        if (syncedIds.length > 0) {
+          await OrderRepository.markOrdersSynced(syncedIds);
+        }
+        const syncedAltIds = res.data.synced_alteration_ids || [];
+        for (const altId of syncedAltIds) {
+          await SettlementRepository.removeAlteration(altId);
+        }
+        const syncedAttIds = res.data.synced_attendance_ids || [];
+        if (syncedAttIds.length > 0) {
+          await AttendanceRepository.markAttendanceSynced(syncedAttIds);
+        }
+        const syncedDrawerIds = res.data.synced_drawer_ids || [];
+        if (syncedDrawerIds.length > 0) {
+          await CashDrawerRepository.markLogsSynced(syncedDrawerIds);
+        }
+        const syncedDayEndIds = res.data.synced_day_end_ids || [];
+        if (syncedDayEndIds.length > 0) {
+          const placeholders = syncedDayEndIds.map(() => "?").join(",");
+          await executeQuery(`UPDATE day_end_records SET is_synced = 1 WHERE id IN (${placeholders})`, syncedDayEndIds);
+        }
+
+        const totalPushed = (syncedIds.length || 0) + (syncedAltIds.length || 0) + (syncedAttIds.length || 0) + (syncedDrawerIds.length || 0) + (syncedDayEndIds.length || 0);
+        showToast({
+          type: "success",
+          message: "Synced to Server!",
+          subtitle: `Successfully pushed ${totalPushed || unsyncedBatch.length} pending record(s) to cloud/server.`,
+          duration: 4000,
+        });
+
+        await fetchTabletQueueCount();
+        fetchSyncStatus();
+      } else {
+        throw new Error(res.data?.error || "Server rejected push sync.");
+      }
+    } catch (pushErr: any) {
+      console.error("Manual push failed:", pushErr);
+      showToast({
+        type: "error",
+        message: "Push Sync Failed",
+        subtitle: pushErr.message || "Network timeout or server unreachable. Order remains safely saved on tablet.",
+        duration: 5000,
+      });
+    } finally {
+      setTabletSyncing(false);
+    }
+  };
+
   const fetchSyncStatus = async () => {
     try {
       const res = await fetch(`${API_URL}/api/sync/status`);
@@ -186,6 +290,7 @@ export default function GeneralSettingsScreen() {
   useEffect(() => {
     fetchSettings();
     fetchSyncStatus();
+    fetchTabletQueueCount();
   }, []);
 
   useEffect(() => {
@@ -608,6 +713,84 @@ export default function GeneralSettingsScreen() {
               </View>
               <CustomSwitch value={autoPushDayEnd} onValueChange={setAutoPushDayEnd} />
             </View>
+          </View>
+        </View>
+
+        {/* 📱 TABLET LOCAL SQLITE QUEUE & DIRECT PUSH CARD */}
+        <View style={[styles.cloudSyncContainer, { borderColor: "#4f46e5", backgroundColor: "#0f172a" }]}>
+          <View style={styles.cloudSyncHeader}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <View style={[styles.cloudIconWrapper, { backgroundColor: "rgba(99, 102, 241, 0.15)" }]}>
+                <Ionicons name="phone-portrait-outline" size={20} color="#818cf8" />
+              </View>
+              <View>
+                <Text style={styles.cloudTitle}>Tablet Local SQLite Queue</Text>
+                <Text style={styles.cloudSubtitle}>This Device Storage (Offline Sales & Attendance)</Text>
+              </View>
+            </View>
+
+            <View style={[
+              styles.cloudStatusBadge, 
+              tabletQueueCount === 0 ? styles.cloudStatusOnline : styles.cloudStatusOffline
+            ]}>
+              <View style={[
+                styles.statusDot, 
+                { backgroundColor: tabletQueueCount === 0 ? "#22c55e" : "#f59e0b" }
+              ]} />
+              <Text style={styles.cloudStatusText}>
+                {tabletQueueCount === 0 ? "All Orders Synced" : `${tabletQueueCount} Pending Push`}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.cloudStatsRow}>
+            <View style={styles.cloudStatBox}>
+              <Text style={styles.cloudStatLabel}>DEVICE PENDING ORDERS</Text>
+              <Text style={[styles.cloudStatValue, tabletQueueCount > 0 && { color: "#f59e0b" }]}>
+                {tabletQueueCount}
+              </Text>
+            </View>
+
+            <View style={styles.cloudStatBox}>
+              <Text style={styles.cloudStatLabel}>STATUS</Text>
+              <Text style={styles.cloudStatValueSmall}>
+                {tabletQueueCount > 0 ? "Waiting to upload" : "Up to date"}
+              </Text>
+            </View>
+
+            <View style={styles.cloudStatBox}>
+              <Text style={styles.cloudStatLabel}>TARGET SERVER</Text>
+              <Text style={[styles.cloudStatValueSmall, { fontSize: 13, color: "#38bdf8" }]} numberOfLines={1}>
+                {API_URL?.replace(/^https?:\/\//, '') || "Server"}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.cloudButtonsRow}>
+            <TouchableOpacity
+              style={[styles.syncActionBtn, { backgroundColor: "#6366f1" }, tabletSyncing && { opacity: 0.7 }]}
+              onPress={handleTabletManualPush}
+              disabled={tabletSyncing}
+              activeOpacity={0.8}
+            >
+              {tabletSyncing ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <Ionicons name="arrow-up-circle-outline" size={18} color="#fff" />
+                  <Text style={styles.syncActionBtnText}>Push Tablet SQLite to Server Now</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.syncActionBtnSecondary, { borderColor: "#818cf8" }]}
+              onPress={fetchTabletQueueCount}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="refresh-outline" size={18} color="#818cf8" />
+              <Text style={[styles.syncActionBtnSecondaryText, { color: "#818cf8" }]}>Check Queue</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
