@@ -206,10 +206,11 @@ export default function GeneralSettingsScreen() {
       }
     } catch (pushErr: any) {
       console.error("Manual push failed:", pushErr);
+      const errorMsg = pushErr.response?.data?.error || pushErr.message || "Network timeout or server unreachable. Order remains safely saved on tablet.";
       showToast({
         type: "error",
         message: "Push Sync Failed",
-        subtitle: pushErr.message || "Network timeout or server unreachable. Order remains safely saved on tablet.",
+        subtitle: errorMsg,
         duration: 5000,
       });
     } finally {

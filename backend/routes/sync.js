@@ -178,6 +178,11 @@ router.post("/push", async (req, res) => {
         } catch (_) {}
 
         const payMode = String(order.payment_method || rawPayload.paymentMethod || "CASH").toUpperCase();
+        const payModeCode = payMode === "CASH" ? 1 : 
+                            payMode === "CARD" ? 2 : 
+                            payMode === "YEAHPAY CARD" ? 8 :
+                            payMode === "YEAHPAY PAYNOW" ? 7 : 3;
+
         const totalAmt = parseFloat(order.total_amount) || 0;
         const subtotalAmt = parseFloat(order.subtotal) || totalAmt;
         const taxAmt = parseFloat(order.tax_amount) || 0;
@@ -194,7 +199,7 @@ router.post("/push", async (req, res) => {
         setReq.input("bizId", sql.UniqueIdentifier, defaultBizId);
         setReq.input("userId", sql.UniqueIdentifier, safeUserId);
         setReq.input("startDate", sql.Date, activeStartDate);
-        setReq.input("payMode", sql.VarChar(50), payMode);
+        setReq.input("payModeCode", sql.Int, payModeCode);
         setReq.input("serverName", sql.VarChar(50), safeCustomerName);
 
         await setReq.query(`
@@ -217,7 +222,7 @@ router.post("/push", async (req, res) => {
             ) VALUES (
               @bizId, @sid, @sid, @orderNo, GETDATE(), GETDATE(),
               @subtotal, @tax, @disc, @total, 5,
-              @userId, GETDATE(), CAST(GETDATE() AS DATE), @payMode, @startDate, 0
+              @userId, GETDATE(), CAST(GETDATE() AS DATE), @payModeCode, @startDate, 0
             );
 
             INSERT INTO RestaurantInvoiceCur (
@@ -227,7 +232,7 @@ router.post("/push", async (req, res) => {
             ) VALUES (
               @bizId, @sid, @sid, @orderNo, GETDATE(), GETDATE(),
               @subtotal, @tax, @disc, @total, 5,
-              @userId, GETDATE(), CAST(GETDATE() AS DATE), @payMode, @startDate
+              @userId, GETDATE(), CAST(GETDATE() AS DATE), @payModeCode, @startDate
             );
 
           END
@@ -246,6 +251,8 @@ router.post("/push", async (req, res) => {
             .input("sid", sql.UniqueIdentifier, orderGuid)
             .input("payMode", sql.VarChar(50), pMode)
             .input("amount", sql.Decimal(18, 2), pAmt)
+            .input("bizId", sql.UniqueIdentifier, defaultBizId)
+            .input("userId", sql.UniqueIdentifier, safeUserId)
             .input("startDate", sql.Date, activeStartDate)
             .query(`
               DECLARE @pPos INT = 1;
@@ -254,22 +261,28 @@ router.post("/push", async (req, res) => {
                  OR UPPER(LTRIM(RTRIM(Description))) = UPPER(LTRIM(RTRIM(@payMode)));
               IF @pPos IS NULL SET @pPos = 1;
 
-              INSERT INTO PaymentDetailCur (
-                PaymentId, RestaurantBillId, Paymode, Amount, start_date, CreatedOn
+              INSERT INTO [dbo].[PaymentDetailCur] (
+                PaymentId, RestaurantBillId, BilledFor, PaymentCollectedOn, PaymentType, Paymode,
+                Amount, ReferenceNumber, Remarks, BusinessUnitId, CreatedBy, CreatedOn, ModifiedBy, ModifiedOn, start_date
               ) VALUES (
-                NEWID(), @sid, @pPos, @amount, @startDate, GETDATE()
+                NEWID(), @sid, 1, GETDATE(), 1, @pPos,
+                @amount, '', @payMode, @bizId, @userId, GETDATE(), @userId, GETDATE(), @startDate
               );
 
-              INSERT INTO PaymentDetail (
-                PaymentId, RestaurantBillId, SettlementId, InvoiceId, OrderId, Paymode, Amount, start_date, CreatedOn, isUploadHQ, isSettlement
+              INSERT INTO [dbo].[PaymentDetail] (
+                PaymentId, RestaurantBillId, SettlementId, InvoiceId, OrderId, BilledFor, PaymentCollectedOn, 
+                PaymentType, Paymode, Amount, ReferenceNumber, Remarks, BusinessUnitId, 
+                CreatedBy, CreatedOn, ModifiedBy, ModifiedOn, isSettlement, start_date
               ) VALUES (
-                NEWID(), @sid, @sid, @sid, @sid, @pPos, @amount, @startDate, GETDATE(), 0, 1
+                NEWID(), @sid, @sid, @sid, @sid, 1, GETDATE(), 
+                1, @pPos, @amount, '', @payMode, @bizId, 
+                @userId, GETDATE(), @userId, GETDATE(), 1, @startDate
               );
 
               INSERT INTO SettlementTotalSales (
-                SettlementID, PayMode, SysAmount, ManualAmount, ReceiptCount, start_date
+                SettlementID, PayMode, SysAmount, ManualAmount, AmountDiff, ReceiptCount
               ) VALUES (
-                @sid, @payMode, @amount, @amount, 1, @startDate
+                @sid, @payMode, @amount, @amount, 0, 1
               );
             `).catch(pErr => console.warn("Payment detail insert warning:", pErr.message));
         }
