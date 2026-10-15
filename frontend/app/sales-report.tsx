@@ -902,12 +902,21 @@ export default function SalesReport() {
         const { SettlementRepository } = require("../db/SettlementRepository");
         const localSettlements = await SettlementRepository.getSettlementsByRange(startStr, endStr);
         if (Array.isArray(localSettlements) && localSettlements.length > 0) {
-          const serverBillNos = new Set(
-            serverSales.map((s: any) => String(s.BillNo || s.OrderNumber || s.SettlementID || "").trim())
+                    const serverBillNos = new Set(
+            serverSales
+              .map((s: any) => String(s.BillNo || s.OrderNumber || "").trim())
+              .filter((b: string) => b && b.toUpperCase() !== "EMPTY")
           );
-          const pendingUnsynced = localSettlements.filter(
-            (ls: any) => !serverBillNos.has(String(ls.BillNo || ls.OrderNumber || ls.SettlementID || "").trim())
+          const serverSettlementIds = new Set(
+            serverSales.map((s: any) => String(s.SettlementID || "").trim()).filter(Boolean)
           );
+          const pendingUnsynced = localSettlements.filter((ls: any) => {
+            const sid = String(ls.SettlementID || "").trim();
+            const bno = String(ls.BillNo || ls.OrderNumber || "").trim();
+            if (sid && serverSettlementIds.has(sid)) return false;
+            if (bno && bno.toUpperCase() !== "EMPTY" && serverBillNos.has(bno)) return false;
+            return true;
+          });
           if (pendingUnsynced.length > 0) {
             serverSales = [...pendingUnsynced, ...serverSales];
           }
@@ -1408,7 +1417,7 @@ export default function SalesReport() {
 
     if (selectedFilter === "DAILY") {
       result = sales.filter((s) => {
-        const dateToUse = s.BusinessDate || s.SettlementDate;
+        const dateToUse = s.BusinessDate || s.SettlementDate || s.CreatedOn || s.start_date;
         if (!dateToUse) return false;
         const itemDate = getSingaporeDateString(parseDatabaseDate(dateToUse));
         return itemDate === selectedDate;
@@ -1428,7 +1437,7 @@ export default function SalesReport() {
       const endStr = selectedDate;
 
       result = sales.filter((s) => {
-        const dateToUse = s.BusinessDate || s.SettlementDate;
+        const dateToUse = s.BusinessDate || s.SettlementDate || s.CreatedOn || s.start_date;
         if (!dateToUse) return false;
         const saleDateStr = getSingaporeDateString(parseDatabaseDate(dateToUse));
         return saleDateStr >= startStr && saleDateStr <= endStr;
@@ -1443,7 +1452,7 @@ export default function SalesReport() {
       const endStr = `${parts[0]}-${parts[1]}-${String(lastDay).padStart(2, "0")}`;
 
       result = sales.filter((s) => {
-        const dateToUse = s.BusinessDate || s.SettlementDate;
+        const dateToUse = s.BusinessDate || s.SettlementDate || s.CreatedOn || s.start_date;
         if (!dateToUse) return false;
         const saleDateStr = getSingaporeDateString(parseDatabaseDate(dateToUse));
         return saleDateStr >= startStr && saleDateStr <= endStr;
@@ -1457,14 +1466,14 @@ export default function SalesReport() {
       const endStr = selectedDate;
 
       result = sales.filter((s) => {
-        const dateToUse = s.BusinessDate || s.SettlementDate;
+        const dateToUse = s.BusinessDate || s.SettlementDate || s.CreatedOn || s.start_date;
         if (!dateToUse) return false;
         const saleDateStr = getSingaporeDateString(parseDatabaseDate(dateToUse));
         return saleDateStr >= startStr && saleDateStr <= endStr;
       });
     } else if (selectedFilter === "CUSTOM" && rangeStart && rangeEnd) {
       result = sales.filter((s) => {
-        const dateToUse = s.BusinessDate || s.SettlementDate;
+        const dateToUse = s.BusinessDate || s.SettlementDate || s.CreatedOn || s.start_date;
         if (!dateToUse) return false;
         const saleDateStr = getSingaporeDateString(parseDatabaseDate(dateToUse));
         return saleDateStr >= rangeStart && saleDateStr <= rangeEnd;

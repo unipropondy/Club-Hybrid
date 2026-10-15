@@ -395,13 +395,16 @@ export class SettlementRepository {
         server_name as waiter_name,
         is_cancelled as IsCancelled,
         cancellation_reason as CancellationReason,
+        start_date as BusinessDate,
         start_date,
+        created_on as SettlementDate,
         created_on as CreatedOn,
         1 as isOffline
       FROM settlement_header
-      WHERE date(start_date) >= date(?) AND date(start_date) <= date(?)
+      WHERE (date(start_date) >= date(?) AND date(start_date) <= date(?))
+         OR (date(created_on) >= date(?) AND date(created_on) <= date(?))
       ORDER BY created_on DESC`,
-      [sDate, eDate]
+      [sDate, eDate, sDate, eDate]
     );
 
     return rows;

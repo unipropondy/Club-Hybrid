@@ -101,7 +101,11 @@ router.post("/push", async (req, res) => {
       }
 
       // Safe column values strictly truncated to schema bounds
-      const safeOrderNo = String(order.order_number || `W-${clientId.substring(0, 8)}`).substring(0, 20);
+      const rawOrderNo = String(order.order_number || "").trim();
+      const isInvalidOrderNo = !rawOrderNo || rawOrderNo.toUpperCase() === "EMPTY" || rawOrderNo.toUpperCase().includes("EMPTY") || rawOrderNo.toUpperCase() === "NEW" || rawOrderNo.toUpperCase() === "#NEW";
+      const safeOrderNo = isInvalidOrderNo
+        ? `POS-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${clientId.substring(0, 4).toUpperCase()}`
+        : rawOrderNo.substring(0, 20);
       const safeTableNo = String(order.table_no || "TA").substring(0, 10);
       const safeCustomerName = String(order.waiter_name || order.customer_name || "Waiter").substring(0, 9);
       const safeUserId = (order.waiter_id && IS_UUID_REGEX.test(order.waiter_id)) ? order.waiter_id : defaultUserGuid;
@@ -132,6 +136,14 @@ router.post("/push", async (req, res) => {
             1, @isClosed, @createdAt, GETDATE(), @createdAt,
             @clientId, @bizId, @userId, 1, 0, 1, @startDate
           );
+        END
+        ELSE
+        BEGIN
+          UPDATE RestaurantOrderCur
+          SET isOrderClosed = @isClosed,
+              TotalAmount = @total,
+              ModifiedOn = GETDATE()
+          WHERE OrderId = @orderId OR ClientOrderID = @clientId;
         END
       `);
 
@@ -180,6 +192,7 @@ router.post("/push", async (req, res) => {
         const payMode = String(order.payment_method || rawPayload.paymentMethod || "CASH").toUpperCase();
         const payModeCode = payMode === "CASH" ? 1 : 
                             payMode === "CARD" ? 2 : 
+                            payMode === "FOC" ? 10 :
                             payMode === "YEAHPAY CARD" ? 8 :
                             payMode === "YEAHPAY PAYNOW" ? 7 : 3;
 
@@ -203,15 +216,21 @@ router.post("/push", async (req, res) => {
         setReq.input("serverName", sql.VarChar(50), safeCustomerName);
 
         await setReq.query(`
-          IF NOT EXISTS (SELECT 1 FROM SettlementHeader WHERE SettlementID = @sid OR BillNo = @orderNo)
+          IF NOT EXISTS (SELECT 1 FROM SettlementHeader WHERE SettlementID = @sid)
           BEGIN
+            DECLARE @finalBillNo VARCHAR(50) = @orderNo;
+            IF EXISTS (SELECT 1 FROM SettlementHeader WHERE BillNo = @finalBillNo)
+            BEGIN
+              SET @finalBillNo = @finalBillNo + '-' + SUBSTRING(CONVERT(VARCHAR(50), @sid), 1, 4);
+            END
+
             INSERT INTO SettlementHeader (
               SettlementID, LastSettlementDate, LastDayEndDate, SubTotal, TotalTax, DiscountAmount,
               BillNo, OrderType, TableNo, Section, BusinessUnitId, SysAmount, ManualAmount,
               CreatedBy, CreatedOn, SER_NAME, start_date, isUploadHQ, IsCancelled
             ) VALUES (
               @sid, GETDATE(), GETDATE(), @subtotal, @tax, @disc,
-              @orderNo, 'DINE-IN', @tableNo, 'MAIN', @bizId, @total, @total,
+              @finalBillNo, 'DINE-IN', @tableNo, 'MAIN', @bizId, @total, @total,
               @userId, GETDATE(), @serverName, @startDate, 0, 0
             );
 
@@ -220,7 +239,7 @@ router.post("/push", async (req, res) => {
               TotalLineItemAmount, TotalTax, DiscountAmount, TotalAmount, StatusCode,
               CreatedBy, CreatedOn, InvoiceDate, PaymentTermCode, start_date, isUploadHQ
             ) VALUES (
-              @bizId, @sid, @sid, @orderNo, GETDATE(), GETDATE(),
+              @bizId, @sid, @sid, @finalBillNo, GETDATE(), GETDATE(),
               @subtotal, @tax, @disc, @total, 5,
               @userId, GETDATE(), CAST(GETDATE() AS DATE), @payModeCode, @startDate, 0
             );
@@ -230,7 +249,7 @@ router.post("/push", async (req, res) => {
               TotalLineItemAmount, TotalTax, DiscountAmount, TotalAmount, StatusCode,
               CreatedBy, CreatedOn, InvoiceDate, PaymentTermCode, start_date
             ) VALUES (
-              @bizId, @sid, @sid, @orderNo, GETDATE(), GETDATE(),
+              @bizId, @sid, @sid, @finalBillNo, GETDATE(), GETDATE(),
               @subtotal, @tax, @disc, @total, 5,
               @userId, GETDATE(), CAST(GETDATE() AS DATE), @payModeCode, @startDate
             );

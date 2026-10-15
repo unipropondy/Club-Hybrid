@@ -1897,9 +1897,18 @@ export default function PaymentScreen() {
       try {
         const { OrderRepository } = require("../db/OrderRepository");
 
+        const isValidBillNo = (id: any) =>
+          id &&
+          typeof id === "string" &&
+          id.trim() !== "" &&
+          id.trim().toUpperCase() !== "EMPTY" &&
+          !id.toUpperCase().includes("EMPTY") &&
+          id.trim().toUpperCase() !== "NEW" &&
+          id.trim().toUpperCase() !== "#NEW";
+
         const offlineBillNo =
-          displayOrderId ||
-          saleData.orderId ||
+          (isValidBillNo(displayOrderId) ? displayOrderId : null) ||
+          (isValidBillNo(saleData.orderId) ? saleData.orderId : null) ||
           await OfflineOrderSequence.getNextOrderNumber();
 
         // 1. Save completed order into local SQLite

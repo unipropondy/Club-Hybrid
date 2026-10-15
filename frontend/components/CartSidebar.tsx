@@ -1674,10 +1674,11 @@ export default React.memo(function CartSidebar({ width = 400 }: CartSidebarProps
             ? `Table ${orderContext.tableNo || ""}` 
             : `TW-${orderContext.takeawayNo || ""}`;
 
-          const generatedOrderNo =
-            currentOrderId && currentOrderId !== "NEW" && currentOrderId !== "#NEW"
-              ? currentOrderId
-              : (currentTableOrderId || await OfflineOrderSequence.getNextOrderNumber());
+          const isInvalidOrderId = !currentOrderId || currentOrderId === "NEW" || currentOrderId === "#NEW" || currentOrderId === "EMPTY" || currentOrderId.includes("EMPTY");
+          const isValidTableOrder = currentTableOrderId && currentTableOrderId !== "EMPTY" && !currentTableOrderId.includes("EMPTY") && currentTableOrderId !== "NEW" && currentTableOrderId !== "#NEW";
+          const generatedOrderNo = !isInvalidOrderId
+            ? currentOrderId
+            : (isValidTableOrder ? currentTableOrderId : await OfflineOrderSequence.getNextOrderNumber());
 
           await OrderRepository.createOrder(
             {
