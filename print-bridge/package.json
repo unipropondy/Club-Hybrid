@@ -5,6 +5,7 @@
   "author": "UniPro",
   "main": "dist/index.js",
   "scripts": {
+    "clean": "node -e \"const fs=require('fs'); ['dist','customer-display-web'].forEach(d=>{try{fs.rmSync(d,{recursive:true,force:true})}catch(e){}})\"",
     "build": "tsc && xcopy /E /I /Y src\\public dist\\public",
     "start": "electron .",
     "dev": "npm run build && electron .",
@@ -27,9 +28,9 @@
   },
   "build": {
     "appId": "com.unipro.poscounter",
-    "productName": "UniPro POS Counter",
+    "productName": "Smart-Club POS UniPro",
     "directories": {
-      "output": "dist-installer-release"
+      "output": "C:/unipro_build_output"
     },
     "files": [
       "dist/**/*",
@@ -46,11 +47,15 @@
         "to": "backend",
         "filter": [
           "**/*",
-          ".env",
+          "!**/.env*",
           "!**/node_modules/.cache/**",
           "!**/*.log",
           "!error_log.txt",
-          "!**/scratch/**"
+          "!**/scratch/**",
+          "!**/scripts/**",
+          "!check_schema.js",
+          "!diagnose_rewards.js",
+          "!migrate_reward_details.js"
         ]
       },
       {
@@ -59,7 +64,8 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -67,7 +73,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "UniPro POS Counter"
+      "shortcutName": "Smart-Club POS UniPro"
     }
   }
 }

@@ -45,6 +45,7 @@ export function useOfflineSync(backendUrl: string) {
   });
 
   const isSyncingRef = useRef(false);
+  const isPullingRef = useRef(false);
 
   const updateState = useCallback((patch: Partial<SyncStatusState>) => {
     setSyncState((prev) => {
@@ -152,7 +153,8 @@ export function useOfflineSync(backendUrl: string) {
    * Pull updated master data and today's sales from server into local SQLite cache
    */
   const pullMasterData = useCallback(async (): Promise<void> => {
-    if (!cleanUrl) return;
+    if (!cleanUrl || isPullingRef.current) return;
+    isPullingRef.current = true;
     try {
       const response = await axios.get(`${cleanUrl}/api/sync/pull`, { timeout: 15000 });
       if (response.data?.success) {

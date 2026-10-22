@@ -2219,6 +2219,27 @@ class UniversalPrinter {
     // High visibility large bold TOTAL
     text += `[R]<font size='big'><B>TOTAL: ${symbol}${finalTotal.toFixed(2)}</B></font>\n`;
 
+    // Cash Received & Change Return for Cash paymode
+    const isCashMode = String(saleData.paymentMethod || "").toUpperCase().includes("CASH") ||
+      (Array.isArray(saleData.payments) && saleData.payments.some((p: any) => String(p.payMode || p.payModeName || "").toUpperCase().includes("CASH")));
+
+    const rawCashPaid = saleData.cashPaid !== undefined && saleData.cashPaid !== null && !isNaN(parseFloat(String(saleData.cashPaid)))
+      ? parseFloat(String(saleData.cashPaid))
+      : (saleData.tenderedAmount !== undefined ? parseFloat(String(saleData.tenderedAmount)) : 0);
+
+    const rawChange = saleData.change !== undefined && saleData.change !== null && !isNaN(parseFloat(String(saleData.change)))
+      ? parseFloat(String(saleData.change))
+      : (saleData.changeAmount !== undefined ? parseFloat(String(saleData.changeAmount)) : 0);
+
+    const cashReceived = rawCashPaid > 0 ? rawCashPaid : (isCashMode ? finalTotal : 0);
+    const changeReturn = rawChange >= 0 ? rawChange : Math.max(0, cashReceived - finalTotal);
+
+    if (!isCheckout && isCashMode && (cashReceived > 0 || changeReturn > 0)) {
+      text += lineDash;
+      text += this.formatTwoCols("<B>Cash Received:</B>", `<B>${symbol}${cashReceived.toFixed(2)}</B>`, effectiveWidth);
+      text += this.formatTwoCols("<B>Change Return:</B>", `<B>${symbol}${changeReturn.toFixed(2)}</B>`, effectiveWidth);
+    }
+
     // Reward points summary
     if (saleData.rewardPointsEarned && parseFloat(String(saleData.rewardPointsEarned)) > 0) {
       text += lineDash;

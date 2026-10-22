@@ -3,7 +3,7 @@
  * UNIPRO HYBRID POS - CLOUD TO LOCAL DATABASE FULL CLONER
  * ============================================================================
  * Copies complete master data, operational schemas, and tables from
- * Central Cloud MSSQL (myerpcloud.dyndns.org:9199) into Local MSSQL (localhost:1433)
+ * Central Cloud MSSQL into Local MSSQL (localhost:1433)
  *
  * Features:
  * - High-speed parameterized batch streaming (up to 2,000 params per query)
@@ -19,11 +19,11 @@ require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 const sql = require("mssql");
 
 const remoteConfig = {
-  server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER || "myerpcloud.dyndns.org",
-  port: parseInt(process.env.REMOTE_DB_PORT || process.env.DB_PORT || "9199"),
-  database: process.env.REMOTE_DB_NAME || process.env.DB_NAME || "UCSCLUB",
-  user: process.env.REMOTE_DB_USER || process.env.DB_USER || "ups",
-  password: process.env.REMOTE_DB_PASSWORD || process.env.DB_PASSWORD || "ups",
+  server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER,
+  port: parseInt(process.env.REMOTE_DB_PORT || process.env.DB_PORT || "1433"),
+  database: process.env.REMOTE_DB_NAME || process.env.DB_NAME,
+  user: process.env.REMOTE_DB_USER || process.env.DB_USER,
+  password: process.env.REMOTE_DB_PASSWORD || process.env.DB_PASSWORD,
   options: {
     encrypt: false,
     trustServerCertificate: true,

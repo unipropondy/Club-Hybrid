@@ -86,7 +86,7 @@ router.post('/log', authenticateToken, async (req, res) => {
     //    and must appear in settlement. Cashier can manually open drawer in that case.
     if (actionType && amount > 0) {
       if (actionType === 'CASH_IN' && amount > 0) {
-        // Fetch SGT date directly from remote SQL server clock (myerpcloud.dyndns.org)
+        // Fetch SGT date directly from SQL server clock
         const dateRes = await new sql.Request(transaction).query("SELECT FORMAT(GETDATE(), 'yyyyMMdd') as dateStr");
         const dateStr = dateRes.recordset[0].dateStr;
         const randId = Math.floor(1000 + Math.random() * 9000);
@@ -109,7 +109,7 @@ router.post('/log', authenticateToken, async (req, res) => {
             VALUES (@CashInNo, CAST(GETDATE() AS DATE), @Amount, @Reason, @Remarks, @PaymentMode, @ReferenceNo, @TerminalCode, @CreatedBy, GETDATE(), @startDate, @AttachmentUrl)
           `);
       } else if (actionType === 'CASH_OUT' && amount > 0) {
-        // Fetch SGT date directly from remote SQL server clock (myerpcloud.dyndns.org)
+        // Fetch SGT date directly from SQL server clock
         const dateRes = await new sql.Request(transaction).query("SELECT FORMAT(GETDATE(), 'yyyyMMdd') as dateStr");
         const dateStr = dateRes.recordset[0].dateStr;
         const randId = Math.floor(1000 + Math.random() * 9000);

@@ -1,5 +1,5 @@
-const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+const { initSecureConfig } = require("./secureConfig");
+initSecureConfig();
 const sql = require("mssql");
 
 function buildConfig({ server, port, database, user, password }, useInstance = true) {
@@ -79,11 +79,11 @@ async function connectWithFallback() {
   }, false);
 
   const remoteConfig = buildConfig({
-    server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER || "myerpcloud.dyndns.org",
-    port: process.env.REMOTE_DB_PORT || process.env.DB_PORT || "9199",
-    database: process.env.REMOTE_DB_NAME || process.env.DB_NAME || "UCSCLUB",
-    user: process.env.REMOTE_DB_USER || process.env.DB_USER || "ups",
-    password: process.env.REMOTE_DB_PASSWORD || process.env.DB_PASSWORD || "ups",
+    server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER,
+    port: process.env.REMOTE_DB_PORT || process.env.DB_PORT,
+    database: process.env.REMOTE_DB_NAME || process.env.DB_NAME,
+    user: process.env.REMOTE_DB_USER || process.env.DB_USER,
+    password: process.env.REMOTE_DB_PASSWORD || process.env.DB_PASSWORD,
   }, false);
 
   // 1. Attempt Local Database Connection (Instance Strategy)

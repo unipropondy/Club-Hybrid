@@ -1785,6 +1785,30 @@ router.post("/save", async (req, res) => {
       if (existingCheck.recordset.length > 0) {
         const existing = existingCheck.recordset[0];
         console.log(`[SAVE SALE] Duplicate check matched by OrderId! Settlement already exists for order ${orderId}. BillNo: ${existing.BillNo}`);
+
+        // 🛡️ Auto-clear Table & Order: If settlement is already recorded in DB, table must NOT stay open
+        try {
+          if (tableId) {
+            const cleanTid = tableId.replace(/^\{|\}$/g, "").trim();
+            await pool.request()
+              .input("tid", sql.VarChar(100), cleanTid)
+              .input("orderNo", sql.NVarChar(50), orderId)
+              .query(`
+                DELETE FROM [dbo].[CartItems] WHERE [CartId] = @tid;
+                UPDATE [dbo].[TableMaster] SET Status = 0, entry_status = NULL, TotalAmount = 0, StartTime = NULL, CurrentOrderId = NULL, CustomerName = NULL, Pax = NULL, ModifiedOn = GETDATE() WHERE TableId = @tid;
+                UPDATE [dbo].[RestaurantOrderCur] SET isOrderClosed = 1, ModifiedOn = GETDATE() WHERE OrderNumber = @orderNo;
+              `);
+            const io = req.app.get("io");
+            if (io) {
+              io.emit("table_status_updated", { tableId: cleanTid.toLowerCase(), status: 0, totalAmount: 0 });
+              io.emit("cart_updated", { tableId: cleanTid.toLowerCase() });
+              io.emit("order_closed", { tableId: cleanTid.toLowerCase(), orderId });
+            }
+          }
+        } catch (cleanupErr) {
+          console.error("⚠️ [SAVE SALE] Duplicate check cleanup failed:", cleanupErr.message);
+        }
+
         return res.json({ success: true, settlementId: existing.SettlementID, billNo: existing.BillNo, orderId: orderId });
       }
     }
@@ -1807,6 +1831,26 @@ router.post("/save", async (req, res) => {
       if (tableSettlementCheck.recordset.length > 0) {
         const existing = tableSettlementCheck.recordset[0];
         console.warn(`[SAVE SALE] 🛡️ Ghost Settlement Guard: Table ${cleanTableId} already has a non-cancelled settlement (${existing.SettlementID}). Blocking duplicate write.`);
+
+        try {
+          await pool.request()
+            .input("tid", sql.VarChar(100), cleanTableId)
+            .input("orderNo", sql.NVarChar(50), existing.BillNo)
+            .query(`
+              DELETE FROM [dbo].[CartItems] WHERE [CartId] = @tid;
+              UPDATE [dbo].[TableMaster] SET Status = 0, entry_status = NULL, TotalAmount = 0, StartTime = NULL, CurrentOrderId = NULL, CustomerName = NULL, Pax = NULL, ModifiedOn = GETDATE() WHERE TableId = @tid;
+              UPDATE [dbo].[RestaurantOrderCur] SET isOrderClosed = 1, ModifiedOn = GETDATE() WHERE OrderNumber = @orderNo;
+            `);
+          const io = req.app.get("io");
+          if (io) {
+            io.emit("table_status_updated", { tableId: cleanTableId.toLowerCase(), status: 0, totalAmount: 0 });
+            io.emit("cart_updated", { tableId: cleanTableId.toLowerCase() });
+            io.emit("order_closed", { tableId: cleanTableId.toLowerCase(), orderId: existing.BillNo });
+          }
+        } catch (cleanupErr) {
+          console.error("⚠️ [SAVE SALE] Ghost settlement guard cleanup failed:", cleanupErr.message);
+        }
+
         return res.json({ success: true, settlementId: existing.SettlementID, billNo: existing.BillNo, orderId: existing.BillNo });
       }
     }

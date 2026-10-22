@@ -83,14 +83,45 @@ export function getNodeExecutable(): { executable: string; useElectronAsNode: bo
 }
 
 /**
+ * Ensures port 5000 is completely free by terminating any lingering/stale node or backend process holding it.
+ */
+function freePort5000(): void {
+  if (process.platform !== 'win32') return;
+  try {
+    const netstatOut = execSync('netstat -ano', { stdio: 'pipe' }).toString();
+    const lines = netstatOut.split('\n');
+    const pidsToKill = new Set<string>();
+
+    for (const line of lines) {
+      if (line.includes(':5000 ') && line.includes('LISTENING')) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (pid && pid !== '0' && pid !== process.pid.toString()) {
+          pidsToKill.add(pid);
+        }
+      }
+    }
+
+    for (const pid of pidsToKill) {
+      logger.info(`[BackendManager] Found stale process holding port 5000 (PID: ${pid}). Terminating...`);
+      try {
+        execSync(`taskkill /pid ${pid} /T /F`, { stdio: 'ignore' });
+        logger.info(`[BackendManager] Successfully terminated stale PID ${pid}.`);
+      } catch (err: any) {
+        logger.warn(`[BackendManager] Could not kill PID ${pid}: ${err.message}`);
+      }
+    }
+  } catch (err: any) {
+    logger.warn(`[BackendManager] Error checking port 5000: ${err.message}`);
+  }
+}
+
+/**
  * Starts the embedded Node.js backend server in the background.
  */
 export async function startBackendProcess(): Promise<void> {
-  const isAlreadyRunning = await checkBackendAlive(5000, 1000);
-  if (isAlreadyRunning) {
-    logger.info('[BackendManager] Backend server is already running on port 5000. Skipping spawn.');
-    return;
-  }
+  // Always free port 5000 on fresh launch so a crashed/stale zombie backend doesn't block this app
+  freePort5000();
 
   const backendDir = getBackendDir();
   const serverScript = path.join(backendDir, 'server.js');

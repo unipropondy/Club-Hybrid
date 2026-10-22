@@ -3,11 +3,11 @@ const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
 
 const remoteConfig = {
-  server: process.env.REMOTE_DB_SERVER || "myerpcloud.dyndns.org",
-  port: parseInt(process.env.REMOTE_DB_PORT || "9199"),
-  database: process.env.REMOTE_DB_NAME || "UCSCLUB",
-  user: process.env.REMOTE_DB_USER || "ups",
-  password: process.env.REMOTE_DB_PASSWORD || "ups",
+  server: process.env.REMOTE_DB_SERVER,
+  port: parseInt(process.env.REMOTE_DB_PORT || "1433"),
+  database: process.env.REMOTE_DB_NAME,
+  user: process.env.REMOTE_DB_USER,
+  password: process.env.REMOTE_DB_PASSWORD,
   options: { encrypt: false, trustServerCertificate: true },
 };
 

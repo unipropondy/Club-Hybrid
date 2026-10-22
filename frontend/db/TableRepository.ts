@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import { executeQuery, executeTransaction } from './database';
 
 export interface CachedTable {
@@ -18,11 +19,19 @@ export interface CachedTable {
 }
 
 export class TableRepository {
+  private static lastCachedHash: string = "";
+
   /**
    * Save or update tables into local SQLite cache
    */
   static async saveTables(tables: any[]): Promise<void> {
     if (!tables || tables.length === 0) return;
+
+    const currentHash = `${tables.length}_${tables.map(t => `${t.TableNumber || t.label}_${t.Status || 0}_${t.totalAmount || t.TotalAmount || 0}`).join("|")}`;
+    if (this.lastCachedHash === currentHash) return;
+    this.lastCachedHash = currentHash;
+
+    if (Platform.OS === "web") return;
 
     const now = new Date().toISOString();
     const statements = tables.map((t) => {

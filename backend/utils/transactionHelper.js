@@ -6,11 +6,16 @@ const path = require("path");
 // Keep a registry of active transactions for monitoring and emergency rollback
 const activeTransactions = new Set();
 
-// Ensure logs directory exists
-const LOGS_DIR = path.resolve(__dirname, "../logs");
-if (!fs.existsSync(LOGS_DIR)) {
-  fs.mkdirSync(LOGS_DIR, { recursive: true });
+// Ensure logs directory exists (Use APPDATA when running in packaged Program Files)
+let LOGS_DIR = path.resolve(__dirname, "../logs");
+if (process.env.APPDATA) {
+  LOGS_DIR = path.join(process.env.APPDATA, "unipro-pos-counter", "logs");
 }
+try {
+  if (!fs.existsSync(LOGS_DIR)) {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+  }
+} catch (_) {}
 const LEAKS_LOG_FILE = path.join(LOGS_DIR, "transaction_leaks.log");
 
 // 🚀 GHOST SHIELD: Globally intercept sql.Request constructor to track requests created with new sql.Request(transaction)

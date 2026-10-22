@@ -6,30 +6,8 @@ const crypto = require("crypto");
 const path = require("path");
 const sql = require("mssql");
 
-const envPath = path.resolve(__dirname, ".env");
-
-// 1. Ensure the .env file exists
-if (!fs.existsSync(envPath)) {
-  fs.writeFileSync(envPath, "");
-}
-
-// 2. Read current .env content
-let envContent = fs.readFileSync(envPath, "utf8");
-
-// 3. If JWT_SECRET is not defined in .env, generate a unique one and save it
-if (!envContent.includes("JWT_SECRET=")) {
-  const secureSecret = crypto.randomBytes(32).toString("hex");
-  const prefix = envContent.endsWith("\n") || envContent.trim() === "" ? "" : "\n";
-  fs.appendFileSync(envPath, `${prefix}JWT_SECRET=${secureSecret}\n`);
-  console.log("🔒 [Security] JWT_SECRET was missing! A brand-new unique key has been automatically generated and saved to .env.");
-}
-
-// 4. Load env variables
-require("dotenv").config({ path: envPath });
-
-if (!process.env.JWT_SECRET) {
-  throw new Error("FATAL: JWT_SECRET environment variable is not set!");
-}
+const { initSecureConfig } = require("./config/secureConfig");
+initSecureConfig();
 
 const { poolPromise } = require("./config/db");
 const { initDB, syncKitchensToPrintMaster } = require("./config/init");
@@ -269,12 +247,20 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
 }));
 
 // 📝 System Request & Activity Logger (Persisted to logs/system.log)
-const SYSTEM_LOGS_DIR = path.resolve(__dirname, "../logs");
-if (!fs.existsSync(SYSTEM_LOGS_DIR)) {
-  fs.mkdirSync(SYSTEM_LOGS_DIR, { recursive: true });
+let SYSTEM_LOGS_DIR = path.resolve(__dirname, "../logs");
+if (process.env.APPDATA) {
+  SYSTEM_LOGS_DIR = path.join(process.env.APPDATA, "unipro-pos-counter", "logs");
 }
+try {
+  if (!fs.existsSync(SYSTEM_LOGS_DIR)) {
+    fs.mkdirSync(SYSTEM_LOGS_DIR, { recursive: true });
+  }
+} catch (_) {}
 const SYSTEM_LOG_FILE = path.join(SYSTEM_LOGS_DIR, "system.log");
-const BACKEND_LOG_STREAM = fs.createWriteStream(SYSTEM_LOG_FILE, { flags: "a" });
+let BACKEND_LOG_STREAM = null;
+try {
+  BACKEND_LOG_STREAM = fs.createWriteStream(SYSTEM_LOG_FILE, { flags: "a" });
+} catch (_) {}
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -283,7 +269,9 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const duration = Date.now() - start;
     const logLine = `[${timestamp}] [BACKEND] ${req.method} ${req.originalUrl || req.url} | Status: ${res.statusCode} | ${duration}ms\n`;
-    BACKEND_LOG_STREAM.write(logLine);
+    if (BACKEND_LOG_STREAM) {
+      BACKEND_LOG_STREAM.write(logLine);
+    }
   });
   next();
 });
@@ -446,7 +434,7 @@ setInterval(async () => {
 }, 5 * 60 * 1000); // 5 Minutes
 
 // 📊 TEMPORARY DIAGNOSTICS LOGGING (Every 5 minutes)
-const DIAGNOSTICS_LOG_FILE = path.join(__dirname, "logs", "diagnostics.log");
+const DIAGNOSTICS_LOG_FILE = path.join(SYSTEM_LOGS_DIR, "diagnostics.log");
 
 function logDiagnostics(label = "Interval") {
   try {
@@ -543,6 +531,32 @@ httpServer.listen(PORT, async () => {
   } catch (err) {
     console.error("⚠️ Initial DB setup failed:", err.message);
   }
+
+  // 📡 Network Banner for tablets, POS clients and KDS
+  try {
+    const os = require("os");
+    const networkInterfaces = os.networkInterfaces();
+    let bestIp = "127.0.0.1";
+    for (const ifaceName of Object.keys(networkInterfaces)) {
+      for (const iface of networkInterfaces[ifaceName]) {
+        if (iface.family === "IPv4" && !iface.internal) {
+          bestIp = iface.address;
+          if (ifaceName.toLowerCase().includes("wi-fi") || ifaceName.toLowerCase().includes("ethernet")) {
+            break;
+          }
+        }
+      }
+    }
+
+    const dbName = process.env.DB_NAME || "UCSPONDY";
+    console.log(`\n========================================================================`);
+    console.log(`  📡 LOCAL SERVER ACTIVE FOR ALL NETWORK DEVICES & TABLETS`);
+    console.log(`========================================================================`);
+    console.log(`  Backend Server API : http://${bestIp}:${PORT}`);
+    console.log(`  Local Database     : ${dbName} (Local MS SQL Server)`);
+    console.log(`  Print Bridge / POS : http://${bestIp}:3050`);
+    console.log(`========================================================================\n`);
+  } catch (_) {}
 
   // 🔄 KITCHEN AUTO-SYNC: Detect new kitchens from backoffice every 3 minutes
   // This ensures any kitchen added in the backoffice automatically appears

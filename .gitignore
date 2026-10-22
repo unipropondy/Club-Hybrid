@@ -65,9 +65,17 @@ yarn-error.*
 *.tsbuildinfo
 
 # =========================
-# Backend Logs
+# Backend Logs & Dev Scratch
 # =========================
 backend/logs/
+backend/error_log.txt
+backend/scratch/
+backend/scripts/vault.js
+backend/check_schema.js
+backend/diagnose_rewards.js
+backend/migrate_reward_details.js
+logs/
+*.log
 
 UCS_PONDY/
 
@@ -79,7 +87,13 @@ print-bridge/customer-display-web/
 print-bridge/dist/
 print-bridge/dist-installer/
 print-bridge/dist-installer-release/
+print-bridge/dist-release/
+print-bridge/dist-prod/
 print-bridge/logs/
 packages/customer-display/node_modules/
+**/dist/
+**/dist-*/
 **/win-unpacked/
-*.exe
+*.exe
+*.blockmap
+C:/unipro_build_output/

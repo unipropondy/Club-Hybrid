@@ -1,8 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
-title UniPro POS Counter - Windows Desktop Packager (.exe Installer)
+title Smart-Club POS UniPro - Windows Desktop Packager (.exe Installer)
 echo =====================================================================
-echo       UniPro Hybrid POS - Windows Desktop Application Packager
+echo       Smart-Club POS UniPro - Windows Desktop Application Packager
 echo =====================================================================
 echo  This script packages the Counter PC application into a standalone 
 echo  Windows (.exe) installer bundling:
@@ -17,6 +17,12 @@ set "ROOT_DIR=%~dp0"
 set "FRONTEND_DIR=%ROOT_DIR%frontend"
 set "BRIDGE_DIR=%ROOT_DIR%print-bridge"
 set "OUTPUT_DIR=%BRIDGE_DIR%\dist-installer"
+echo [Step 0/3] Cleaning Stale Build Artifacts ^& Temp Folders...
+if exist "%BRIDGE_DIR%\dist" rmdir /s /q "%BRIDGE_DIR%\dist" >nul 2>&1
+if exist "%BRIDGE_DIR%\customer-display-web" rmdir /s /q "%BRIDGE_DIR%\customer-display-web" >nul 2>&1
+if exist "C:\unipro_build_output" rmdir /s /q "C:\unipro_build_output" >nul 2>&1
+echo [Step 0/3] Workspace cleaned successfully.
+echo.
 
 echo [Step 1/3] Building Production Web Bundle from Frontend...
 cd /d "%FRONTEND_DIR%"
@@ -28,8 +34,13 @@ if %ERRORLEVEL% neq 0 (
 )
 echo [Step 1/3] Frontend Web export completed successfully.
 echo.
+echo [Step 1b/3] Inlining Vector Icons ^& Typography into Web Bundle...
+cd /d "%BRIDGE_DIR%"
+call node inline_fonts.js
+echo [Step 1b/3] Font injection completed successfully.
+echo.
 
-echo [Step 2/3] Compiling Print-Bridge & Desktop Host TypeScript...
+echo [Step 2/3] Compiling Print-Bridge ^& Desktop Host TypeScript...
 cd /d "%BRIDGE_DIR%"
 call npm run build
 if %ERRORLEVEL% neq 0 (
@@ -48,12 +59,17 @@ if %ERRORLEVEL% neq 0 (
   pause
   exit /b %ERRORLEVEL%
 )
+
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+copy /Y "C:\unipro_build_output\*.exe" "%OUTPUT_DIR%\" >nul 2>&1
+
 echo.
 echo =====================================================================
-echo  [SUCCESS] UniPro POS Counter Windows Installer Created Successfully!
+echo  [SUCCESS] Smart-Club POS UniPro Windows Installer Created Successfully!
 echo =====================================================================
 echo  Installer location:
-echo    %OUTPUT_DIR%
+echo    %OUTPUT_DIR%\Smart-Club POS UniPro Setup 1.0.0.exe
+echo    or C:\unipro_build_output\
 echo =====================================================================
 echo.
 pause

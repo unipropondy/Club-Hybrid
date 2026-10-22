@@ -370,19 +370,23 @@ router.post("/push", async (req, res) => {
               DECLARE @cId UNIQUEIDENTIFIER = NULL;
               DECLARE @cName NVARCHAR(100) = NULL;
               DECLARE @gName NVARCHAR(100) = NULL;
-              SELECT TOP 1 @cId = dg.CategoryId, @cName = cm.CategoryName, @gName = dg.DishGroupName
+              DECLARE @gId UNIQUEIDENTIFIER = NULL;
+              SELECT TOP 1 @gId = dg.DishGroupId, @cId = dg.CategoryId, @cName = cm.CategoryName, @gName = dg.DishGroupName
               FROM DishMaster d WITH (NOLOCK)
               LEFT JOIN DishGroupMaster dg WITH (NOLOCK) ON d.DishGroupId = dg.DishGroupId
               LEFT JOIN CategoryMaster cm WITH (NOLOCK) ON dg.CategoryId = cm.CategoryId
               WHERE d.DishId = @dishId;
 
               INSERT INTO SettlementItemDetail (
-                SettlementID, DishId, DishName, SongName, Qty, Price, Status, OrderDateTime,
-                CategoryId, CategoryName, SubCategoryName, start_date
+                SettlementID, DishId, DishGroupId, SubCategoryId, CategoryId,
+                DishName, SongName, Qty, Price, Status, OrderDateTime,
+                CategoryName, SubCategoryName, start_date
               ) VALUES (
-                @sid, @dishId, @dishName, '', @qty, @rate, 'NORMAL', GETDATE(),
-                @cId, @cName, @gName, @startDate
+                @sid, @dishId, @gId, @gId, @cId,
+                @dishName, '', @qty, @rate, 'NORMAL', GETDATE(),
+                @cName, @gName, @startDate
               );
+
 
               INSERT INTO RestaurantOrderDetail (
                 OrderDetailId, OrderId, DishId, Description, DishName, Quantity, PricePerUnit,

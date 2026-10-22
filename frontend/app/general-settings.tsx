@@ -622,7 +622,9 @@ export default function GeneralSettingsScreen() {
               </View>
               <View>
                 <Text style={styles.cloudTitle}>Cloud ERP Synchronization</Text>
-                <Text style={styles.cloudSubtitle}>HQ Cloud DB: myerpcloud.dyndns.org:9199</Text>
+                <Text style={styles.cloudSubtitle}>
+                  {syncStatus?.isCloudReachable ? "Central Cloud ERP (Connected)" : "Operating in Counter Offline Mode"}
+                </Text>
               </View>
             </View>
 

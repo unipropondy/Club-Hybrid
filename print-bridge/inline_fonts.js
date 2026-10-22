@@ -28,7 +28,12 @@ const interRegUri = getFontDataUri('assets/node_modules/@expo-google-fonts/inter
 const interMedUri = getFontDataUri('assets/node_modules/@expo-google-fonts/inter/500Medium/Inter_500Medium.137ab18bace28dd0bd83eb3b8ed2bc54.ttf');
 const interSemiUri = getFontDataUri('assets/node_modules/@expo-google-fonts/inter/600SemiBold/Inter_600SemiBold.a5f35888d2da465de352e0dcfaf33324.ttf');
 const interBoldUri = getFontDataUri('assets/node_modules/@expo-google-fonts/inter/700Bold/Inter_700Bold.6e237de4f1f413afa2fcc45c77ac343a.ttf');
+const interExtraBoldUri = getFontDataUri('assets/node_modules/@expo-google-fonts/inter/800ExtraBold/Inter_800ExtraBold.6016034293c084aa0c056e83938bf1cc.ttf');
 const interBlackUri = getFontDataUri('assets/node_modules/@expo-google-fonts/inter/900Black/Inter_900Black.bcec6eda9700a81ba92c483a2f2c02c1.ttf');
+
+const antDesignUri = getFontDataUri('assets/node_modules/@expo/vector-icons/build/vendor/react-native-vector-icons/Fonts/AntDesign.3f78af31cca60105799838a1a7a59fbd.ttf');
+const octiconsUri = getFontDataUri('assets/node_modules/@expo/vector-icons/build/vendor/react-native-vector-icons/Fonts/Octicons.871378c6eab492a3e689a9385dc45a12.ttf');
+const simpleLineUri = getFontDataUri('assets/node_modules/@expo/vector-icons/build/vendor/react-native-vector-icons/Fonts/SimpleLineIcons.d2285965fe34b05465047401b8595dd0.ttf');
 
 html = html.replace(/<style id="vector-icons-fonts">[\s\S]*?<\/style>/g, '');
 
@@ -75,6 +80,11 @@ const inlineFontStyles = `
         font-display: block;
       }
       @font-face {
+        font-family: 'FontAwesome5_Solid';
+        src: url('${fa5SolidUri}') format('truetype');
+        font-display: block;
+      }
+      @font-face {
         font-family: 'FontAwesome5Free-Regular';
         src: url('${fa5RegUri}') format('truetype');
         font-display: block;
@@ -100,6 +110,21 @@ const inlineFontStyles = `
         font-display: block;
       }
       @font-face {
+        font-family: 'AntDesign';
+        src: url('${antDesignUri}') format('truetype');
+        font-display: block;
+      }
+      @font-face {
+        font-family: 'Octicons';
+        src: url('${octiconsUri}') format('truetype');
+        font-display: block;
+      }
+      @font-face {
+        font-family: 'SimpleLineIcons';
+        src: url('${simpleLineUri}') format('truetype');
+        font-display: block;
+      }
+      @font-face {
         font-family: 'Inter_400Regular';
         src: url('${interRegUri}') format('truetype');
         font-display: block;
@@ -120,9 +145,32 @@ const inlineFontStyles = `
         font-display: block;
       }
       @font-face {
+        font-family: 'Inter_800ExtraBold';
+        src: url('${interExtraBoldUri}') format('truetype');
+        font-display: block;
+      }
+      @font-face {
         font-family: 'Inter_900Black';
         src: url('${interBlackUri}') format('truetype');
         font-display: block;
+      }
+      * {
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+      body, html, #root {
+        font-family: 'Inter_400Regular', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      input, textarea {
+        user-select: text !important;
+        -webkit-user-select: text !important;
+        font-family: 'Inter_500Medium', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+      }
+      ::selection {
+        background-color: rgba(124, 58, 237, 0.35);
+        color: inherit;
       }
     </style>
 `;

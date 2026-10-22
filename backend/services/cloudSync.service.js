@@ -1,6 +1,6 @@
 const sql = require("mssql");
-const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, "../.env") });
+const { initSecureConfig } = require("../config/secureConfig");
+initSecureConfig();
 const { poolPromise, getPool } = require("../config/db");
 
 let remotePoolInstance = null;
@@ -21,11 +21,11 @@ async function getRemotePool() {
   }
 
   const remoteConfig = {
-    user: process.env.REMOTE_DB_USER || process.env.DB_USER || "ups",
-    password: process.env.REMOTE_DB_PASSWORD || process.env.DB_PASSWORD || "ups",
-    server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER || "myerpcloud.dyndns.org",
-    port: parseInt(process.env.REMOTE_DB_PORT || process.env.DB_PORT || "9199"),
-    database: process.env.REMOTE_DB_NAME || process.env.DB_NAME || "UCSCLUB",
+    user: process.env.REMOTE_DB_USER || process.env.DB_USER,
+    password: process.env.REMOTE_DB_PASSWORD || process.env.DB_PASSWORD,
+    server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER,
+    port: parseInt(process.env.REMOTE_DB_PORT || process.env.DB_PORT || "1433"),
+    database: process.env.REMOTE_DB_NAME || process.env.DB_NAME,
     options: {
       encrypt: false,
       trustServerCertificate: true,
@@ -337,7 +337,7 @@ async function syncLiveTablesAndCarts(remotePool, localPool) {
 }
 
 /**
- * Pushes offline settled sales and live table/cart status from Local MSSQL to Cloud ERP (myerpcloud.dyndns.org).
+ * Pushes offline settled sales and live table/cart status from Local MSSQL to Central Cloud ERP.
  * Guarantees transactional idempotency using SettlementID & BillNo.
  */
 async function pushSalesToCloud(ioInstance = null) {
@@ -376,6 +376,7 @@ async function pushSalesToCloud(ioInstance = null) {
         await syncMembersAndCreditCustomers(remotePool, localPool);
         await syncStaffAttendance(remotePool, localPool);
         await syncSettingsAndSequences(remotePool, localPool);
+        await syncArtistTargetsAndBonuses(remotePool, localPool);
       } catch (subSyncErr) {
         console.warn("⚠️ [CloudSync] Auxiliary sync notice:", subSyncErr.message);
       }
@@ -818,13 +819,16 @@ async function pushSalesToCloud(ioInstance = null) {
     // 5. Sync Settings & Order Sequences
     await syncSettingsAndSequences(remotePool, localPool);
 
-    // 6. Update LastCloudSyncTime in AppSettings
+    // 6. Sync Artist Targets, CashBox & Bonus Transactions
+    await syncArtistTargetsAndBonuses(remotePool, localPool);
+
+    // 7. Update LastCloudSyncTime in AppSettings
     await localPool.request().query(`
       IF EXISTS (SELECT 1 FROM AppSettings)
         UPDATE AppSettings SET LastCloudSyncTime = GETDATE()
     `).catch(() => {});
 
-    console.log(`☁️ [CloudSync] Successfully pushed ${pushedCount} bills to Cloud ERP (${process.env.REMOTE_DB_SERVER || "myerpcloud.dyndns.org"}).`);
+    console.log(`☁️ [CloudSync] Successfully pushed ${pushedCount} bills to Central Cloud ERP.`);
 
     if (ioInstance) {
       ioInstance.emit("cloud_sync_completed", {
@@ -1226,6 +1230,9 @@ async function pullMasterFromCloud(ioInstance = null) {
 
     // 6. Pull updated CompanySettings from Cloud
     await syncSettingsAndSequences(remotePool, localPool);
+
+    // 7. Sync Artist Targets (dishOrderItemShare)
+    await syncArtistTargetsAndBonuses(remotePool, localPool);
 
     console.log(`✅ [CloudSync] Master data pull complete (${remoteDishes.recordset.length} dishes, ${remoteTables.recordset.length} tables synced).`);
 
@@ -1677,6 +1684,180 @@ async function syncSettingsAndSequences(remotePool, localPool) {
 }
 
 /**
+ * Synchronizes Artist Targets (dishOrderItemShare), Artist Cash Box entries (ArtistCashBox),
+ * and Artist Bonus transactions (ArtistBonusTransaction) to Central Cloud ERP.
+ */
+async function syncArtistTargetsAndBonuses(remotePool, localPool) {
+  try {
+    const remoteCols = async (tableName) => {
+      const res = await remotePool.request().query(`
+        SELECT COLUMN_NAME, DATA_TYPE, COLUMNPROPERTY(object_id(TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IsIdentity
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = '${tableName}'
+      `);
+      return res.recordset.filter(c => c.IsIdentity !== 1);
+    };
+
+    // 1. Sync ArtistCashBox (Push local cashbox entries to remote)
+    const locCashboxRes = await localPool.request().query(`
+      SELECT TOP 100 * FROM ArtistCashBox WITH (NOLOCK)
+      ORDER BY CreatedDate DESC
+    `);
+    const cbCols = await remoteCols("ArtistCashBox");
+    let cbSynced = 0;
+
+    for (const cb of locCashboxRes.recordset) {
+      const check = await remotePool.request()
+        .input("cbId", sql.UniqueIdentifier, cb.CashBoxId)
+        .query("SELECT TOP 1 CashBoxId FROM ArtistCashBox WITH (NOLOCK) WHERE CashBoxId = @cbId");
+
+      if (check.recordset.length === 0) {
+        const iReq = remotePool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of cbCols) {
+          const val = cb[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            let paramVal = val;
+            if (["datetime", "date", "smalldatetime", "datetime2"].includes(col.DATA_TYPE)) {
+              paramVal = safeDate(val);
+            }
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@cb_${col.COLUMN_NAME}`);
+            iReq.input(`cb_${col.COLUMN_NAME}`, paramVal);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`
+            INSERT INTO ArtistCashBox (${colNames.join(", ")})
+            VALUES (${paramNames.join(", ")})
+          `).catch(e => console.warn("ArtistCashBox insert warning:", e.message));
+          cbSynced++;
+        }
+      }
+    }
+
+    // 2. Sync dishOrderItemShare (Artist Targets - Bidirectional)
+    // Push local targets to remote
+    const locTargetsRes = await localPool.request().query("SELECT * FROM dishOrderItemShare WITH (NOLOCK)");
+    const targetCols = await remoteCols("dishOrderItemShare");
+
+    for (const tgt of locTargetsRes.recordset) {
+      const name = String(tgt.CustomerName || "").trim();
+      if (!name) continue;
+
+      const check = await remotePool.request()
+        .input("name", sql.NVarChar(200), name)
+        .query("SELECT TOP 1 Id FROM dishOrderItemShare WITH (NOLOCK) WHERE LTRIM(RTRIM(CustomerName)) = @name");
+
+      if (check.recordset.length > 0) {
+        await remotePool.request()
+          .input("name", sql.NVarChar(200), name)
+          .input("tgtAmt", sql.Decimal(18, 2), tgt.TargetAmount || tgt.Amount || 0)
+          .input("amt", sql.Decimal(18, 2), tgt.Amount || 0)
+          .input("fromDt", sql.DateTime, safeDate(tgt.FromDate))
+          .input("toDt", sql.DateTime, safeDate(tgt.ToDate))
+          .input("sel", sql.Bit, tgt.IsSelected ? 1 : 0)
+          .query(`
+            UPDATE dishOrderItemShare
+            SET TargetAmount = @tgtAmt, Amount = @amt, FromDate = @fromDt, ToDate = @toDt, IsSelected = @sel
+            WHERE LTRIM(RTRIM(CustomerName)) = @name
+          `).catch(() => {});
+      } else {
+        const iReq = remotePool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of targetCols) {
+          const val = tgt[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            let paramVal = val;
+            if (["datetime", "date", "smalldatetime", "datetime2"].includes(col.DATA_TYPE)) {
+              paramVal = safeDate(val);
+            }
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@t_${col.COLUMN_NAME}`);
+            iReq.input(`t_${col.COLUMN_NAME}`, paramVal);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`
+            INSERT INTO dishOrderItemShare (${colNames.join(", ")})
+            VALUES (${paramNames.join(", ")})
+          `).catch(() => {});
+        }
+      }
+    }
+
+    // Pull any remote targets down to local
+    const remTargetsRes = await remotePool.request().query("SELECT * FROM dishOrderItemShare WITH (NOLOCK)");
+    for (const rt of remTargetsRes.recordset) {
+      const rName = String(rt.CustomerName || "").trim();
+      if (!rName) continue;
+
+      const checkLoc = await localPool.request()
+        .input("name", sql.NVarChar(200), rName)
+        .query("SELECT TOP 1 Id FROM dishOrderItemShare WITH (NOLOCK) WHERE LTRIM(RTRIM(CustomerName)) = @name");
+
+      if (checkLoc.recordset.length === 0) {
+        await localPool.request()
+          .input("name", sql.NVarChar(200), rName)
+          .input("tgtAmt", sql.Decimal(18, 2), rt.TargetAmount || rt.Amount || 0)
+          .input("amt", sql.Decimal(18, 2), rt.Amount || 0)
+          .input("fromDt", sql.DateTime, safeDate(rt.FromDate) || new Date())
+          .input("toDt", sql.DateTime, safeDate(rt.ToDate) || new Date())
+          .input("sel", sql.Bit, rt.IsSelected ? 1 : 0)
+          .input("dishId", sql.UniqueIdentifier, rt.DishId || null)
+          .query(`
+            INSERT INTO dishOrderItemShare (CustomerName, TargetAmount, Amount, FromDate, ToDate, IsSelected, DishId, CreatedDate)
+            VALUES (@name, @tgtAmt, @amt, @fromDt, @toDt, @sel, @dishId, GETDATE())
+          `).catch(() => {});
+      }
+    }
+
+    // 3. Sync ArtistBonusTransaction (Push bonus records to Cloud)
+    const locBonusRes = await localPool.request().query(`
+      SELECT TOP 50 * FROM ArtistBonusTransaction WITH (NOLOCK)
+      ORDER BY CreatedDate DESC
+    `);
+    const bonusCols = await remoteCols("ArtistBonusTransaction");
+
+    for (const ab of locBonusRes.recordset) {
+      const check = await remotePool.request()
+        .input("id", sql.UniqueIdentifier, ab.Id)
+        .query("SELECT TOP 1 Id FROM ArtistBonusTransaction WITH (NOLOCK) WHERE Id = @id");
+
+      if (check.recordset.length === 0) {
+        const iReq = remotePool.request();
+        const colNames = [];
+        const paramNames = [];
+        for (const col of bonusCols) {
+          const val = ab[col.COLUMN_NAME];
+          if (val !== undefined && val !== null) {
+            let paramVal = val;
+            if (["datetime", "date", "smalldatetime", "datetime2"].includes(col.DATA_TYPE)) {
+              paramVal = safeDate(val);
+            }
+            colNames.push(`[${col.COLUMN_NAME}]`);
+            paramNames.push(`@ab_${col.COLUMN_NAME}`);
+            iReq.input(`ab_${col.COLUMN_NAME}`, paramVal);
+          }
+        }
+        if (colNames.length > 0) {
+          await iReq.query(`
+            INSERT INTO ArtistBonusTransaction (${colNames.join(", ")})
+            VALUES (${paramNames.join(", ")})
+          `).catch(() => {});
+        }
+      }
+    }
+
+    console.log(`✅ [CloudSync] Artist targets, cashbox & bonuses synchronized (cashbox: ${cbSynced}).`);
+  } catch (err) {
+    console.warn("⚠️ [CloudSync Artist Targets Notice]:", err.message);
+  }
+}
+
+/**
  * Returns current Cloud Sync Status (pending bills, cloud availability, last sync time).
  */
 async function getSyncStatus() {
@@ -1704,26 +1885,28 @@ async function getSyncStatus() {
     // Fast TCP socket probe so UI polling never hangs or lags
     try {
       const net = require("net");
-      const host = process.env.REMOTE_DB_SERVER || "myerpcloud.dyndns.org";
-      const port = parseInt(process.env.REMOTE_DB_PORT || "9199");
+      const host = process.env.REMOTE_DB_SERVER;
+      const port = parseInt(process.env.REMOTE_DB_PORT || "1433");
 
-      isCloudReachable = await new Promise((resolve) => {
-        const socket = new net.Socket();
-        socket.setTimeout(3000);
-        socket.on("connect", () => {
-          socket.destroy();
-          resolve(true);
+      if (host) {
+        isCloudReachable = await new Promise((resolve) => {
+          const socket = new net.Socket();
+          socket.setTimeout(3000);
+          socket.on("connect", () => {
+            socket.destroy();
+            resolve(true);
+          });
+          socket.on("timeout", () => {
+            socket.destroy();
+            resolve(false);
+          });
+          socket.on("error", () => {
+            socket.destroy();
+            resolve(false);
+          });
+          socket.connect(port, host);
         });
-        socket.on("timeout", () => {
-          socket.destroy();
-          resolve(false);
-        });
-        socket.on("error", () => {
-          socket.destroy();
-          resolve(false);
-        });
-        socket.connect(port, host);
-      });
+      }
     } catch {
       isCloudReachable = false;
     }
@@ -1732,8 +1915,8 @@ async function getSyncStatus() {
       isCloudReachable,
       pendingCount,
       lastSyncTime,
-      cloudHost: process.env.REMOTE_DB_SERVER || "myerpcloud.dyndns.org",
-      cloudPort: process.env.REMOTE_DB_PORT || "9199",
+      cloudHost: isCloudReachable ? "Central Cloud ERP (Online)" : "Central Cloud ERP (Offline)",
+      cloudPort: "Protected",
     };
   } catch (err) {
     return {
@@ -1754,6 +1937,7 @@ module.exports = {
   syncMembersAndCreditCustomers,
   syncStaffAttendance,
   syncSettingsAndSequences,
+  syncArtistTargetsAndBonuses,
   getSyncStatus,
   getRemotePool,
 };

@@ -27,7 +27,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import * as React from "react";
 import { useEffect } from "react";
-import { useWindowDimensions, Alert } from "react-native";
+import { useWindowDimensions, Alert, Platform } from "react-native";
 import * as ScreenOrientation from "expo-screen-orientation";
 import { ToastProvider, useToast } from "../components/Toast";
 import { CustomerDisplayManager } from "../components/CustomerDisplayManager";
@@ -41,6 +41,8 @@ import { useTerminalStore } from "@/stores/terminalStore";
 
 // ── Offline Tablet Sync: Auto-syncs SQLite orders to Counter PC ──
 function OfflineSyncRunner() {
+  if (Platform.OS === "web") return null;
+
   const [apiUrl, setApiUrlState] = React.useState(getApiUrl());
 
   useEffect(() => {

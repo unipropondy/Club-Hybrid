@@ -976,15 +976,33 @@ private static escapeHtml(str: string): string {
                   <span>PAYMENT:</span>
                   <span>${(saleData.payments && saleData.payments.length === 1 ? saleData.payments[0].payMode || saleData.payments[0].payModeName : saleData.paymentMethod) || 'CASH'}</span>
                 </div>
-                <div class="payment-row">
-                  <span>PAID:</span>
-                  <span>${currencySymbol}${(saleData.cashPaid || (saleData.payments && saleData.payments.length === 1 ? parseFloat(saleData.payments[0].amount) : finalTotal)).toFixed(2)}</span>
-                </div>
-                <div class="payment-row">
-                  <span>CHANGE:</span>
-                  <span>${currencySymbol}${(saleData.change || 0).toFixed(2)}</span>
-                </div>
               `}
+              ${(() => {
+                const isCash = String(saleData.paymentMethod || '').toUpperCase().includes('CASH') ||
+                  (Array.isArray(saleData.payments) && saleData.payments.some((p: any) => String(p.payMode || p.payModeName || '').toUpperCase().includes('CASH')));
+                const rawCash = saleData.cashPaid !== undefined && saleData.cashPaid !== null && !isNaN(parseFloat(String(saleData.cashPaid)))
+                  ? parseFloat(String(saleData.cashPaid))
+                  : (saleData.tenderedAmount !== undefined ? parseFloat(String(saleData.tenderedAmount)) : 0);
+                const rawChg = saleData.change !== undefined && saleData.change !== null && !isNaN(parseFloat(String(saleData.change)))
+                  ? parseFloat(String(saleData.change))
+                  : (saleData.changeAmount !== undefined ? parseFloat(String(saleData.changeAmount)) : 0);
+                const cRec = rawCash > 0 ? rawCash : (isCash ? finalTotal : 0);
+                const cReturn = rawChg >= 0 ? rawChg : Math.max(0, cRec - finalTotal);
+
+                if (isCash && (cRec > 0 || cReturn > 0)) {
+                  return `
+                    <div class="payment-row" style="margin-top: 1.5mm; border-top: 1px dashed #ccc; padding-top: 1.5mm; font-weight: bold; display: flex; justify-content: space-between;">
+                      <span>CASH RECEIVED:</span>
+                      <span>${currencySymbol}${cRec.toFixed(2)}</span>
+                    </div>
+                    <div class="payment-row" style="font-weight: bold; display: flex; justify-content: space-between;">
+                      <span>CHANGE RETURN:</span>
+                      <span>${currencySymbol}${cReturn.toFixed(2)}</span>
+                    </div>
+                  `;
+                }
+                return '';
+              })()}
             `}
           </div>
 

@@ -18,7 +18,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#FF8C00",
+        "backgroundColor": "#1E1B38",
         "foregroundImage": "./assets/images/logo_pos.png"
       },
       "package": "com.javi06.smartclub",

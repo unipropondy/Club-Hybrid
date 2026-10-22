@@ -287,13 +287,17 @@ app.post('/api/lan/orders', async (req: Request, res: Response) => {
 // Resolves the web assets directory across development, unpacked, and packaged installer modes
 export function getWebAssetsDir(): string {
   const candidates = [
-    path.join(electronApp.getAppPath(), 'customer-display-web'),
+    // 1. Packaged extraResources outside asar (contains full assets tree & fonts)
     path.join(process.resourcesPath || '', 'customer-display-web'),
+    // 2. Unpacked or development customer-display-web
     path.join(process.cwd(), 'customer-display-web'),
     path.join(__dirname, '..', 'customer-display-web'),
+    path.join(__dirname, 'customer-display-web'),
+    // 3. Bundled inside asar fallback
+    path.join(electronApp.getAppPath(), 'customer-display-web'),
   ];
   for (const c of candidates) {
-    if (c && fs.existsSync(c)) return c;
+    if (c && fs.existsSync(path.join(c, 'index.html'))) return c;
   }
   return candidates[0];
 }
@@ -356,6 +360,17 @@ app.use(async (req: Request, res: Response, next) => {
 const webAssetsDir = getWebAssetsDir();
 app.use(express.static(webAssetsDir, { extensions: ['html'] }));
 
+// 5.1 Internal readiness endpoint
+app.get('/is-ready', (req: Request, res: Response) => {
+  const indexPath = path.join(webAssetsDir, 'index.html');
+  res.json({
+    status: 'ok',
+    port: config.port,
+    webAssetsAvailable: fs.existsSync(indexPath),
+    webAssetsDir,
+  });
+});
+
 // Mount customer display endpoints
 app.use('/customer-display', displayRouter);
 
@@ -366,7 +381,8 @@ app.get('*', (req: Request, res: Response, next) => {
     req.path.startsWith('/uploads') ||
     req.path.startsWith('/settings') ||
     req.path.startsWith('/customer-display') ||
-    req.path === '/health'
+    req.path === '/health' ||
+    req.path === '/is-ready'
   ) {
     return next();
   }
@@ -374,31 +390,100 @@ app.get('*', (req: Request, res: Response, next) => {
   if (fs.existsSync(indexPath)) {
     return res.sendFile(indexPath);
   }
-  next();
+
+  // Graceful fallback screen instead of raw Express 404 "Cannot GET /"
+  res.status(503).send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <title>UniPro POS - Initializing</title>
+        <style>
+          body {
+            background-color: #0C0A22;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+          }
+          .card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 480px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+          }
+          .spinner {
+            width: 44px;
+            height: 44px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #6366F1;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+          }
+          @keyframes spin { to { transform: rotate(360deg); } }
+          h2 { margin: 0 0 10px; font-size: 22px; font-weight: 600; }
+          p { color: #94A3B8; font-size: 14px; line-height: 1.5; margin: 0 0 20px; }
+          button {
+            background: #4F46E5;
+            color: #fff;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+          }
+          button:hover { background: #4338CA; }
+        </style>
+        <script>
+          setTimeout(() => { window.location.reload(); }, 2000);
+        </script>
+      </head>
+      <body>
+        <div class="card">
+          <div class="spinner"></div>
+          <h2>UniPro POS Starting Up</h2>
+          <p>The local POS interface is loading or awaiting web assets. This page will automatically refresh.</p>
+          <button onclick="window.location.reload()">Retry Now</button>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 // Initialize Electron Lifecycle
 electronApp.whenReady().then(async () => {
-  logger.info('[Electron] Platform ready. Launching embedded backend...');
+  logger.info('[Electron] Platform ready. Starting services...');
 
-  // 0. Auto-spawn backend service (Method 2: One-Click Embedded Backend)
-  await startBackendProcess();
-
-  // Launch the Express listener + poller
-  const server = app.listen(config.port, () => {
+  // 2. Launch the Express listener + poller immediately for fast app responsiveness
+  const server = app.listen(config.port, async () => {
     logger.info(`UniPro Print Bridge & POS Hub listening locally on port ${config.port}`);
     startPoller();
-
     loadPersistedState();
     startMonitorWatcher();
 
     // 1. Initialize System Tray Menu
     initTray();
 
-    // 2. Launch Cashier POS Window on Primary Display
+    // 2. Start embedded backend and wait for it before showing POS window
+    logger.info('[Electron] Starting embedded backend and waiting for readiness...');
+    try {
+      await startBackendProcess();
+    } catch (err: any) {
+      logger.error(`[Electron] Backend process startup error: ${err.message}`);
+    }
+
+    // 3. Launch Cashier POS Window on Primary Display (backend is now ready or timed out)
     launchCounterPOSWindow();
 
-    // 3. If a secondary display is already plugged in on start, launch customer display
+    // 4. If a secondary display is already plugged in on start, launch customer display
     if (getSecondaryDisplay()) {
       launchCustomerDisplay();
     }
@@ -433,7 +518,7 @@ electronApp.whenReady().then(async () => {
   // Windows Startup Registry Configuration
   electronApp.setLoginItemSettings({
     openAtLogin: true,
-    name: 'UniPro POS Counter',
+    name: 'Smart-Club POS UniPro',
   });
 });
 
