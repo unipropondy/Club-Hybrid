@@ -696,7 +696,7 @@ class SunmiPrinterService {
         await SunmiModule.printText(formatter.center(`* Prices include ${companySettings.gstPercentage}% GST`));
       }
 
-      await SunmiModule.lineWrap(3);
+      await SunmiModule.lineWrap(1);
       await SunmiModule.cutPaper();
 
       return true;

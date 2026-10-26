@@ -1877,7 +1877,7 @@ export default function Category() {
       }
     }
 
-    if (newContext.tableId) {
+    if (newContext.tableId && status !== 0) {
       try {
         await fetchCartFromDBGlobal(newContext.tableId);
       } catch (err) {
@@ -3277,22 +3277,30 @@ export default function Category() {
           <View
             style={[
               styles.menuContent,
-              isTablet && { width: 300, right: 20 },
+              { width: isTabletOrDesktopWeb ? 340 : Math.min(width * 0.92, 330) },
               Platform.OS === 'web'
-                ? { height: 500 }
-                : { maxHeight: height * 0.8 },
+                ? { maxHeight: Math.min(height * 0.9, 650) }
+                : { maxHeight: height * 0.88 },
             ]}
           >
             {/* User Info Header & Close Button */}
             <View style={styles.menuUserSection}>
               {user ? (
                 <>
-                  <View style={styles.menuAvatar}>
-                    <Ionicons name="person" size={20} color="#8E8E93" />
+                  <View style={{ position: "relative" }}>
+                    <View style={styles.menuAvatar}>
+                      <Ionicons name="person" size={24} color="#A855F7" />
+                    </View>
+                    <View style={styles.menuAvatarCameraBadge}>
+                      <Ionicons name="camera" size={10} color="#FFFFFF" />
+                    </View>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.menuUserName} numberOfLines={1}>{user.fullName}</Text>
-                    <Text style={styles.menuUserRole}>{user.roleName}</Text>
+                    <Text style={styles.menuUserName} numberOfLines={1}>{user.fullName || "UNIPRO"}</Text>
+                    <View style={styles.menuRoleBadge}>
+                      <Ionicons name="shield-checkmark" size={11} color="#A855F7" />
+                      <Text style={styles.menuRoleBadgeText}>{user.roleName || "ADMIN"}</Text>
+                    </View>
                   </View>
                 </>
               ) : (
@@ -3306,7 +3314,7 @@ export default function Category() {
                 style={styles.menuCloseBtn}
                 activeOpacity={0.7}
               >
-                <Ionicons name="close" size={20} color="#FFFFFF" />
+                <Ionicons name="close" size={20} color="#F0EEFF" />
               </TouchableOpacity>
             </View>
 
@@ -4020,6 +4028,116 @@ export default function Category() {
                 </Text>
               </TouchableOpacity>
             </ScrollView>
+
+            {/* 🌟 LICENSE CARD AT BOTTOM OF MENU (Matches Restaurant POS layout) */}
+            {!isWaiterUser && (
+              <View style={styles.menuLicenseCard}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <View style={styles.menuLicenseLogoContainer}>
+                    {licenseInfo?.CompanyLogoUrl ? (
+                      <Image
+                        source={{ uri: licenseInfo.CompanyLogoUrl }}
+                        style={styles.menuLicenseLogo}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <Ionicons
+                        name="restaurant-outline"
+                        size={22}
+                        color="#A855F7"
+                      />
+                    )}
+                  </View>
+
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                      <Text
+                        style={styles.menuLicenseCompanyName}
+                        numberOfLines={1}
+                      >
+                        {licenseInfo?.CompanyName || "My Restaurant"}
+                      </Text>
+
+                      {(() => {
+                        const today = new Date();
+                        const toDateStr = licenseInfo?.ToDate ? licenseInfo.ToDate.split("T")[0] : null;
+                        let isExpired = false;
+                        if (toDateStr) {
+                          const toDateObj = new Date(toDateStr);
+                          today.setHours(0, 0, 0, 0);
+                          toDateObj.setHours(0, 0, 0, 0);
+                          isExpired = today > toDateObj;
+                        }
+
+                        const badgeColor = isExpired ? "#EF4444" : "#10B981";
+                        const badgeBg = isExpired ? "rgba(239, 68, 68, 0.12)" : "rgba(16, 185, 129, 0.12)";
+                        const statusText = isExpired ? "INACTIVE" : "ACTIVE";
+
+                        return (
+                          <View style={[styles.menuLicenseBadge, { backgroundColor: badgeBg }]}>
+                            <View style={[styles.menuLicenseDot, { backgroundColor: badgeColor }]} />
+                            <Text style={[styles.menuLicenseBadgeText, { color: badgeColor }]}>
+                              {statusText}
+                            </Text>
+                          </View>
+                        );
+                      })()}
+                    </View>
+
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 }}>
+                      <Ionicons name="location-sharp" size={11} color="#64748B" />
+                      <Text style={styles.menuLicenseAddress} numberOfLines={1}>
+                        {licenseInfo?.Address || "Shop Address"}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Valid From -> Valid Until Container */}
+                {(() => {
+                  const today = new Date();
+                  const fromDateStr = licenseInfo?.FromDate ? licenseInfo.FromDate.split("T")[0] : "2026-06-01";
+                  const toDateStr = licenseInfo?.ToDate ? licenseInfo.ToDate.split("T")[0] : "2028-07-28";
+                  let isExpired = false;
+                  if (licenseInfo?.ToDate) {
+                    const toDateObj = new Date(toDateStr);
+                    today.setHours(0, 0, 0, 0);
+                    toDateObj.setHours(0, 0, 0, 0);
+                    isExpired = today > toDateObj;
+                  }
+
+                  return (
+                    <View style={styles.menuLicenseDatesContainer}>
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+                        <Ionicons name="calendar-outline" size={14} color="#A855F7" />
+                        <View>
+                          <Text style={styles.menuLicenseDateLabel}>Valid From</Text>
+                          <Text style={styles.menuLicenseDateValue}>
+                            {fromDateStr}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Ionicons name="arrow-forward" size={12} color="#8B5CF6" style={{ marginHorizontal: 4 }} />
+
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flex: 1 }}>
+                        <Ionicons name="calendar" size={14} color={isExpired ? "#EF4444" : "#22C55E"} />
+                        <View>
+                          <Text style={styles.menuLicenseDateLabel}>Valid Until</Text>
+                          <Text style={[styles.menuLicenseDateValue, { color: isExpired ? "#EF4444" : "#22C55E" }]}>
+                            {toDateStr}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })()}
+
+                <Text style={styles.menuLicenseCopyright}>
+                  © 2026 UNIPRO POS. All rights reserved.
+                </Text>
+              </View>
+            )}
           </View>
         </View>
       </Modal>
@@ -4492,171 +4610,7 @@ export default function Category() {
         </TouchableWithoutFeedback>
       </Modal>
 
-      {!isWaiterUser && (
-        <View
-          style={[
-            styles.licenseCardContainer,
-            {
-              bottom: Math.max(insets.bottom, 12) + 12,
-              left: Math.max(insets.left, 12) + 12,
-              width: Platform.OS === "web" && width >= 1024 ? 350 : isTabletOrDesktopWeb ? 350 : "auto",
-              maxWidth: Platform.OS === "web" && width >= 1024 ? 350 : isTabletOrDesktopWeb ? 350 : 275,
-              paddingVertical: isTabletOrDesktopWeb ? 8 : 6,
-              paddingHorizontal: isTabletOrDesktopWeb ? 16 : 12,
-            },
-          ]}
-        >
-          <View
-            style={[
-              styles.licenseLogoContainer,
-              isTabletOrDesktopWeb && { width: 70, height: 70, borderRadius: 10 },
-            ]}
-          >
-          {licenseInfo?.CompanyLogoUrl ? (
-            <Image
-              source={{ uri: licenseInfo.CompanyLogoUrl }}
-              style={styles.licenseLogo}
-              resizeMode="cover"
-            />
-          ) : (
-            <Ionicons
-              name="restaurant-outline"
-              size={isTabletOrDesktopWeb ? 28 : 22}
-              color={Theme.primary}
-            />
-          )}
-        </View>
-
-        <View style={[styles.licenseTextContainer, { gap: 4 }]}>
-          {/* Row 1: Company Name & Active/Inactive Status Badge */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Text
-              style={[
-                styles.licenseCompanyName,
-                isTabletOrDesktopWeb && { fontSize: 14 },
-              ]}
-              numberOfLines={1}
-            >
-              {licenseInfo?.CompanyName || "Smart POS"}
-            </Text>
-            {licenseInfo && (() => {
-              const today = new Date();
-              const toDateStr = licenseInfo.ToDate ? licenseInfo.ToDate.split("T")[0] : null;
-              let isExpired = false;
-              if (toDateStr) {
-                const toDateObj = new Date(toDateStr);
-                today.setHours(0, 0, 0, 0);
-                toDateObj.setHours(0, 0, 0, 0);
-                isExpired = today > toDateObj;
-              }
-
-              const badgeColor = isExpired ? "#EF4444" : "#22C55E";
-              const badgeBg = isExpired ? "rgba(239, 68, 68, 0.15)" : "rgba(34, 197, 94, 0.15)";
-              const statusText = isExpired ? "INACTIVE" : "ACTIVE";
-
-              return (
-                <View style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  backgroundColor: badgeBg,
-                  borderRadius: 12,
-                  paddingHorizontal: 8,
-                  paddingVertical: 2,
-                  gap: 4
-                }}>
-                  <View style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 3,
-                    backgroundColor: badgeColor,
-                  }} />
-                  <Text style={{
-                    color: badgeColor,
-                    fontSize: 9,
-                    fontFamily: Fonts.bold,
-                    letterSpacing: 0.5
-                  }}>
-                    {statusText}
-                  </Text>
-                </View>
-              );
-            })()}
-          </View>
-
-          {/* Row 1.5: Address */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 1 }}>
-            <View style={{ width: 14, alignItems: "center" }}>
-              <Ionicons
-                name="location-outline"
-                size={isTabletOrDesktopWeb ? 13 : 11}
-                color="#9B8EC4"
-              />
-            </View>
-            <Text
-              style={[
-                styles.licenseAddress,
-                isTabletOrDesktopWeb && { fontSize: 10, lineHeight: 14 },
-                { flex: 1 },
-              ]}
-              numberOfLines={1}
-            >
-              {licenseInfo?.Address || "Shop Address"}
-            </Text>
-          </View>
-
-          {/* Row 2: Valid/Expired Range */}
-          {licenseInfo && (() => {
-            const today = new Date();
-            const fromDateStr = licenseInfo.FromDate ? licenseInfo.FromDate.split("T")[0] : null;
-            const toDateStr = licenseInfo.ToDate ? licenseInfo.ToDate.split("T")[0] : null;
-            let isExpired = false;
-            if (toDateStr) {
-              const toDateObj = new Date(toDateStr);
-              today.setHours(0, 0, 0, 0);
-              toDateObj.setHours(0, 0, 0, 0);
-              isExpired = today > toDateObj;
-            }
-
-            const rangeColor = isExpired ? "#EF4444" : "#10B981";
-            const iconColor = isExpired ? "#EF4444" : "#22C55E";
-
-            return (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2 }}>
-                <View style={{ width: 14, alignItems: "center" }}>
-                  <Ionicons
-                    name={isExpired ? "alert-circle-outline" : "shield-checkmark-outline"}
-                    size={isTabletOrDesktopWeb ? 13 : 11}
-                    color={iconColor}
-                  />
-                </View>
-                <Text style={{
-                  fontSize: 10,
-                  fontFamily: Fonts.medium,
-                  color: "#FFFFFF",
-                }}>
-                  {isExpired ? "Expired: " : "Valid: " }
-                  <Text style={{ color: rangeColor, fontFamily: Fonts.bold }}>
-                    {fromDateStr || ""} to {toDateStr || ""}
-                  </Text>
-                </Text>
-              </View>
-            );
-          })()}
-
-          {/* Row 3: Copyright */}
-          <Text
-            style={[
-              styles.licenseCopyright,
-              isTabletOrDesktopWeb && { fontSize: 9 },
-              { marginTop: 2 }
-            ]}
-          >
-            @ 2026 UNIPRO . All rights reserved.
-          </Text>
-        </View>
-      </View>
-      )}
-    </SafeAreaView>
+      </SafeAreaView>
   );
 }
 
@@ -4965,11 +4919,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   menuContent: {
-    width: 260,
+    width: 330,
     backgroundColor: Theme.bgCard,
-    borderRadius: 20,
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: Theme.primaryBorder,
+    borderColor: "rgba(168, 85, 247, 0.4)",
     overflow: "hidden",
     ...Theme.shadowLg,
   },
@@ -4978,36 +4932,165 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
     paddingHorizontal: 16,
-    paddingVertical: 16,
-    backgroundColor: "#3D0066",
+    paddingVertical: 14,
+    backgroundColor: '#18163A',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(168, 85, 247, 0.25)',
   },
   menuAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#FFFFFF",
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#221F4A',
+    borderWidth: 1.5,
+    borderColor: '#A855F7',
     justifyContent: "center",
     alignItems: "center",
   },
+  menuAvatarCameraBadge: {
+    position: "absolute",
+    bottom: -2,
+    right: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#A855F7',
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1.5,
+    borderColor: '#18163A',
+  },
   menuUserName: {
-    fontSize: 15,
+    fontSize: 16,
     fontFamily: Fonts.black,
-    color: "#FFFFFF",
+    color: '#F0EEFF',
+  },
+  menuRoleBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(168, 85, 247, 0.5)',
+    backgroundColor: 'rgba(168, 85, 247, 0.12)',
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    marginTop: 4,
+    alignSelf: "flex-start",
+  },
+  menuRoleBadgeText: {
+    fontSize: 10,
+    fontFamily: Fonts.bold,
+    color: '#C084FC',
+    letterSpacing: 0.5,
   },
   menuUserRole: {
     fontSize: 11,
     fontFamily: Fonts.medium,
-    color: "rgba(255, 255, 255, 0.75)",
+    color: '#9B8EC4',
     textTransform: "uppercase",
   },
   menuCloseBtn: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: "rgba(255, 255, 255, 0.15)",
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
     justifyContent: "center",
     alignItems: "center",
     marginLeft: 8,
+  },
+
+  /* 🌟 Menu License Card Styles (Royal Noir Smart Club Theme) */
+  menuLicenseCard: {
+    margin: 10,
+    padding: 12,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#A855F7',
+    backgroundColor: '#11102E',
+    shadowColor: '#A855F7',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  menuLicenseLogoContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#3D3875',
+    backgroundColor: '#18163A',
+    justifyContent: "center",
+    alignItems: "center",
+    overflow: "hidden",
+    flexShrink: 0,
+  },
+  menuLicenseLogo: {
+    width: "100%",
+    height: "100%",
+  },
+  menuLicenseCompanyName: {
+    fontSize: 14,
+    fontFamily: Fonts.black,
+    color: '#F0EEFF',
+    flex: 1,
+  },
+  menuLicenseBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2.5,
+    borderRadius: 10,
+    backgroundColor: 'rgba(34, 197, 94, 0.15)',
+    flexShrink: 0,
+  },
+  menuLicenseDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#22C55E',
+  },
+  menuLicenseBadgeText: {
+    fontSize: 9.5,
+    fontFamily: Fonts.bold,
+    color: '#22C55E',
+    letterSpacing: 0.5,
+  },
+  menuLicenseAddress: {
+    fontSize: 10.5,
+    fontFamily: Fonts.medium,
+    color: '#9B8EC4',
+  },
+  menuLicenseDatesContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: '#18163A',
+    borderRadius: 10,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#2E2A5E',
+  },
+  menuLicenseDateLabel: {
+    fontSize: 8.5,
+    fontFamily: Fonts.medium,
+    color: '#9B8EC4',
+  },
+  menuLicenseDateValue: {
+    fontSize: 11,
+    fontFamily: Fonts.bold,
+    color: '#F0EEFF',
+  },
+  menuLicenseCopyright: {
+    fontSize: 9,
+    fontFamily: Fonts.medium,
+    color: '#6B6294',
+    textAlign: "center",
+    marginTop: 8,
   },
   menuDivider: {
     height: 1,

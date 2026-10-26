@@ -62,6 +62,14 @@ router.post("/day-start", async (req, res) => {
         VALUES (@startDate, 'DAY_START', GETDATE(), @username)
       `);
       
+    // Trigger background sync of active business day to Cloud ERP
+    try {
+      const { syncDateEntryToCloud } = require("../services/cloudSync.service");
+      syncDateEntryToCloud(pool).catch((syncErr) => {
+        console.warn("⚠️ [DayStart] Cloud DateEntry push notice:", syncErr.message);
+      });
+    } catch (_) {}
+
     res.json({ success: true, message: "Day started successfully" });
   } catch (err) {
     console.error("Day Start Error:", err);
@@ -124,6 +132,9 @@ router.post("/day-end", async (req, res) => {
     // 3. Trigger automatic Day-End Cloud Sync to HQ ERP
     try {
       const io = req.app.get("io");
+      const { syncDateEntryToCloud } = require("../services/cloudSync.service");
+      syncDateEntryToCloud(pool).catch(() => {});
+
       pushSalesToCloud(io)
         .then((syncRes) => {
           console.log("☁️ [DayEnd] Automatic Cloud Sync completed:", syncRes);

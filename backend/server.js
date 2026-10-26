@@ -9,7 +9,7 @@ const sql = require("mssql");
 const { initSecureConfig } = require("./config/secureConfig");
 initSecureConfig();
 
-const { poolPromise } = require("./config/db");
+const { poolPromise, dbConfig } = require("./config/db");
 const { initDB, syncKitchensToPrintMaster } = require("./config/init");
 const dbCheck = require("./middleware/dbCheck");
 const idempotencyMiddleware = require("./middleware/idempotency");
@@ -536,19 +536,48 @@ httpServer.listen(PORT, async () => {
   try {
     const os = require("os");
     const networkInterfaces = os.networkInterfaces();
-    let bestIp = "127.0.0.1";
-    for (const ifaceName of Object.keys(networkInterfaces)) {
-      for (const iface of networkInterfaces[ifaceName]) {
+    const candidates = [];
+
+    for (const [ifaceName, ifaceList] of Object.entries(networkInterfaces)) {
+      const lowerName = ifaceName.toLowerCase();
+      // Skip virtual, VPN, and tunnel adapters (Hyper-V vEthernet, WSL, Radmin, etc.)
+      if (
+        lowerName.includes("vethernet") ||
+        lowerName.includes("virtual") ||
+        lowerName.includes("hyper-v") ||
+        lowerName.includes("wsl") ||
+        lowerName.includes("radmin") ||
+        lowerName.includes("pseudo") ||
+        lowerName.includes("teredo") ||
+        lowerName.includes("tailscale") ||
+        lowerName.includes("docker") ||
+        lowerName.includes("loopback")
+      ) {
+        continue;
+      }
+
+      for (const iface of ifaceList) {
         if (iface.family === "IPv4" && !iface.internal) {
-          bestIp = iface.address;
-          if (ifaceName.toLowerCase().includes("wi-fi") || ifaceName.toLowerCase().includes("ethernet")) {
-            break;
+          // Priority 1: Wi-Fi / WLAN
+          if (lowerName.includes("wi-fi") || lowerName.includes("wlan") || lowerName.includes("wireless")) {
+            candidates.unshift({ ip: iface.address, priority: 1, name: ifaceName });
+          }
+          // Priority 2: Physical Ethernet
+          else if (lowerName.includes("ethernet") || lowerName.includes("eth") || lowerName.includes("en")) {
+            candidates.push({ ip: iface.address, priority: 2, name: ifaceName });
+          } else {
+            candidates.push({ ip: iface.address, priority: 3, name: ifaceName });
           }
         }
       }
     }
 
-    const dbName = process.env.DB_NAME || "UCSPONDY";
+    candidates.sort((a, b) => a.priority - b.priority);
+    const bestIp = candidates[0]?.ip || "127.0.0.1";
+
+    const pool = await poolPromise;
+    const dbName = pool?.config?.database || dbConfig?.database || process.env.LOCAL_DB_NAME || "UCSCLUB";
+
     console.log(`\n========================================================================`);
     console.log(`  📡 LOCAL SERVER ACTIVE FOR ALL NETWORK DEVICES & TABLETS`);
     console.log(`========================================================================`);

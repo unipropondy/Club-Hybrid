@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { poolPromise, sql } = require("../config/db");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   throw new Error("FATAL: JWT_SECRET environment variable is not set!");
@@ -15,7 +16,7 @@ router.post("/login", async (req, res) => {
     if (!pool) {
       return res.status(503).json({ success: false, message: "Database connection busy or unavailable." });
     }
-    const { userName: rawUserName, password: rawPassword } = req.body;
+    const { userName: rawUserName, password: rawPassword, sessionId: clientSessionId } = req.body;
     const userName = (rawUserName || "").trim();
     const password = (rawPassword || "").trim();
 
@@ -31,6 +32,9 @@ router.post("/login", async (req, res) => {
         SELECT 
           u.UserId, u.UserCode, u.UserName, u.UserPassword, u.FullName,
           u.FirstName, u.LastName, u.IsDisabled, u.UserGroupid,
+          u.IsLoggedIn, u.LastHeartbeat, u.ActiveSessionId,
+          ISNULL(u.AllowedLogins, 1) AS AllowedLogins,
+          DATEDIFF(SECOND, u.LastHeartbeat, GETDATE()) AS HeartbeatAgeSeconds,
           g.UserGroupCode AS RoleCode, g.UserGroupName AS RoleName,
           g.isActive AS IsGroupActive
         FROM [dbo].[UserMaster] u
@@ -94,40 +98,96 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ success: false, message: "Invalid User ID or Password." });
     }
 
-    // Auto-migrate legacy password to bcrypt
-    if (needsRehash) {
-      try {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await pool.request()
-          .input("UserId", user.UserId)
-          .input("HashedPassword", hashedPassword)
-          .query("UPDATE [dbo].[UserMaster] SET UserPassword = @HashedPassword WHERE UserId = @UserId");
-        console.log(`[AUTH] Successfully migrated password to bcrypt for user "${user.UserName}".`);
-      } catch (e) {
-        console.error(`[AUTH] Failed to migrate password to bcrypt for user "${user.UserName}":`, e);
+
+    // 3. CHECK ACTIVE SESSIONS CONCURRENCY LOCK (Supports AllowedLogins = 1, 2, 3...)
+    const allowedLogins = user.AllowedLogins !== undefined && user.AllowedLogins !== null ? Number(user.AllowedLogins) : 1;
+    const isUnlimited = allowedLogins === 0 || allowedLogins >= 999;
+    const clientSession = clientSessionId ? String(clientSessionId).trim() : null;
+
+    if (!isUnlimited) {
+      // 3a. Clean up expired sessions (> 300s / 5 mins since last heartbeat)
+      await pool.request()
+        .input("UserId", String(user.UserId))
+        .query(`
+          DELETE FROM [dbo].[UserSessions]
+          WHERE UserId = @UserId AND DATEDIFF(SECOND, LastHeartbeat, GETDATE()) > 300
+        `);
+
+      // 3b. Query active sessions for this user
+      const sessionsResult = await pool.request()
+        .input("UserId", String(user.UserId))
+        .query(`
+          SELECT SessionId, DATEDIFF(SECOND, LastHeartbeat, GETDATE()) AS AgeSec
+          FROM [dbo].[UserSessions]
+          WHERE UserId = @UserId AND DATEDIFF(SECOND, LastHeartbeat, GETDATE()) <= 300
+        `);
+
+      const activeSessions = sessionsResult.recordset || [];
+      const isAlreadyActiveOnThisDevice = clientSession && activeSessions.some(s => s.SessionId === clientSession);
+
+      // Block only if active sessions reached the limit AND this device is not already one of the active sessions
+      if (!isAlreadyActiveOnThisDevice && activeSessions.length >= allowedLogins) {
+        const oldestSec = activeSessions.length > 0 ? Math.max(...activeSessions.map(s => s.AgeSec || 0)) : 0;
+        const remainingMinutes = Math.min(5, Math.max(1, Math.ceil((300 - oldestSec) / 60)));
+
+        console.log(`[AUTH] Login blocked: User "${user.UserName}" reached limit (${activeSessions.length}/${allowedLogins} devices).`);
+        return res.status(409).json({
+          success: false,
+          isLocked: true,
+          message: `User '${user.UserName}' has reached the maximum allowed concurrent logins (${allowedLogins} device${allowedLogins > 1 ? "s" : ""}). Please log out from another device, or wait ${remainingMinutes} minute(s).`
+        });
       }
     }
 
-    // Update Last Login
+    const newSessionId = clientSession || crypto.randomUUID();
+
+    // 4. Save Session into UserSessions
+    await pool.request()
+      .input("SessionId", newSessionId)
+      .input("UserId", String(user.UserId))
+      .input("IpAddress", req.ip || "")
+      .query(`
+        IF EXISTS (SELECT 1 FROM [dbo].[UserSessions] WHERE SessionId = @SessionId)
+        BEGIN
+          UPDATE [dbo].[UserSessions] SET LastHeartbeat = GETDATE() WHERE SessionId = @SessionId
+        END
+        ELSE
+        BEGIN
+          INSERT INTO [dbo].[UserSessions] (SessionId, UserId, IpAddress, CreatedAt, LastHeartbeat)
+          VALUES (@SessionId, @UserId, @IpAddress, GETDATE(), GETDATE())
+        END
+      `);
+
+    // Update UserMaster
     await pool.request()
       .input("UserId", user.UserId)
-      .query("UPDATE [dbo].[UserMaster] SET LastLogInDate = GETDATE() WHERE UserId = @UserId");
+      .input("SessionId", newSessionId)
+      .query(`
+        UPDATE [dbo].[UserMaster] 
+        SET 
+          LastLogInDate = GETDATE(),
+          IsLoggedIn = 1,
+          LastHeartbeat = GETDATE(),
+          ActiveSessionId = @SessionId
+        WHERE UserId = @UserId
+      `);
 
     const finalUserId = String(user.UserId).trim();
     const roleCode = (user.RoleCode || "CASHIER").toUpperCase().trim();
 
     const token = jwt.sign(
-      { userId: finalUserId, userName: user.UserName, role: roleCode },
+      { userId: finalUserId, userName: user.UserName, role: roleCode, sessionId: newSessionId },
       JWT_SECRET,
       { expiresIn: "24h" }
     );
 
-    console.log(`✅ Login Success: ${user.FullName} | Role: ${roleCode}`);
+    console.log(`✅ Login Success: ${user.FullName} | Role: ${roleCode} | Session: ${newSessionId} | Device Limit: ${isUnlimited ? "Unlimited" : allowedLogins}`);
 
     // 2. Return Comprehensive Auth Response
     return res.json({
       success: true,
       token,
+      sessionId: newSessionId,
       user: {
         userId: finalUserId,
         id: finalUserId,
@@ -142,6 +202,124 @@ router.post("/login", async (req, res) => {
   } catch (err) {
     console.error("LOGIN ERROR:", err);
     res.status(500).json({ success: false, message: "Server error." });
+  }
+});
+
+/* ================= AUTH - HEARTBEAT (EVERY 60s) ================= */
+router.post("/heartbeat", async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    if (!pool) return res.status(503).json({ success: false, message: "Database connection unavailable." });
+
+    const { userId, sessionId } = req.body;
+    if (!userId || !sessionId) {
+      return res.status(400).json({ success: false, message: "Missing userId or sessionId." });
+    }
+
+    // 1. Update UserSessions
+    const sessionRes = await pool.request()
+      .input("UserId", String(userId))
+      .input("SessionId", String(sessionId))
+      .query(`
+        UPDATE [dbo].[UserSessions]
+        SET LastHeartbeat = GETDATE()
+        WHERE UserId = @UserId AND SessionId = @SessionId;
+        SELECT @@ROWCOUNT as rowsAffected;
+      `);
+
+    const updatedRows = sessionRes.recordset[0]?.rowsAffected || 0;
+    if (updatedRows === 0) {
+      // Check if session exists at all or was force-unlocked/revoked
+      return res.status(401).json({ success: false, sessionRevoked: true, message: "Session is no longer active." });
+    }
+
+    // 2. Also touch UserMaster LastHeartbeat
+    await pool.request()
+      .input("UserId", userId)
+      .query(`
+        UPDATE [dbo].[UserMaster]
+        SET LastHeartbeat = GETDATE(), IsLoggedIn = 1
+        WHERE UserId = @UserId
+      `);
+
+    return res.json({ success: true, timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error("[AUTH] Heartbeat error:", err.message);
+    res.status(500).json({ success: false, message: "Heartbeat failed." });
+  }
+});
+
+/* ================= AUTH - LOGOUT ================= */
+router.post("/logout", async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    if (!pool) return res.status(503).json({ success: false, message: "Database connection unavailable." });
+
+    const { userId, sessionId } = req.body;
+    if (userId) {
+      // 1. Remove this specific session
+      if (sessionId) {
+        await pool.request()
+          .input("UserId", String(userId))
+          .input("SessionId", String(sessionId))
+          .query(`DELETE FROM [dbo].[UserSessions] WHERE UserId = @UserId AND SessionId = @SessionId`);
+      }
+
+      // 2. Check how many active sessions remain for this user
+      const remaining = await pool.request()
+        .input("UserId", String(userId))
+        .query(`
+          SELECT COUNT(*) as count FROM [dbo].[UserSessions]
+          WHERE UserId = @UserId AND DATEDIFF(SECOND, LastHeartbeat, GETDATE()) <= 300
+        `);
+
+      const remainingCount = remaining.recordset[0]?.count || 0;
+      if (remainingCount === 0) {
+        await pool.request()
+          .input("UserId", userId)
+          .query(`UPDATE [dbo].[UserMaster] SET IsLoggedIn = 0, ActiveSessionId = NULL, LastHeartbeat = NULL WHERE UserId = @UserId`);
+      }
+      console.log(`[AUTH] User ${userId} logged out (session: ${sessionId || "any"}). Remaining active devices: ${remainingCount}`);
+    }
+
+    return res.json({ success: true, message: "Logged out successfully." });
+  } catch (err) {
+    console.error("[AUTH] Logout error:", err.message);
+    res.status(500).json({ success: false, message: "Logout failed." });
+  }
+});
+
+/* ================= AUTH - FORCE UNLOCK (MANAGER / ADMIN OVERRIDE) ================= */
+router.post("/force-unlock", async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    if (!pool) return res.status(503).json({ success: false, message: "Database connection unavailable." });
+
+    const { userName, userId } = req.body;
+    if (!userName && !userId) {
+      return res.status(400).json({ success: false, message: "Provide userName or userId to unlock." });
+    }
+
+    const request = pool.request();
+    if (userId) {
+      request.input("UserId", String(userId));
+      await request.query(`
+        DELETE FROM [dbo].[UserSessions] WHERE UserId = @UserId;
+        UPDATE [dbo].[UserMaster] SET IsLoggedIn = 0, ActiveSessionId = NULL, LastHeartbeat = NULL WHERE UserId = @UserId;
+      `);
+    } else {
+      request.input("UserName", userName);
+      await request.query(`
+        DELETE FROM [dbo].[UserSessions] WHERE UserId IN (SELECT CAST(UserId AS VARCHAR(100)) FROM [dbo].[UserMaster] WHERE UserCode = @UserName OR UserName = @UserName);
+        UPDATE [dbo].[UserMaster] SET IsLoggedIn = 0, ActiveSessionId = NULL, LastHeartbeat = NULL WHERE UserCode = @UserName OR UserName = @UserName;
+      `);
+    }
+
+    console.log(`[AUTH] User ${userName || userId} force-unlocked.`);
+    return res.json({ success: true, message: "User session unlocked successfully." });
+  } catch (err) {
+    console.error("[AUTH] Force unlock error:", err.message);
+    res.status(500).json({ success: false, message: "Force unlock failed." });
   }
 });
 
@@ -221,19 +399,6 @@ router.post("/verify", async (req, res) => {
       }
     }
 
-    // Auto-migrate legacy password to bcrypt during verification
-    if (isValid && needsRehash && matchedUser) {
-      try {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        await pool.request()
-          .input("UserId", matchedUser.UserId)
-          .input("HashedPassword", hashedPassword)
-          .query("UPDATE [dbo].[UserMaster] SET UserPassword = @HashedPassword WHERE UserId = @UserId");
-        console.log(`[AUTH] Successfully migrated password to bcrypt for user "${matchedUser.UserName}" during verification.`);
-      } catch (e) {
-        console.error(`[AUTH] Failed to migrate password to bcrypt during verification:`, e);
-      }
-    }
 
     return res.json({ success: isValid });
   } catch (err) {

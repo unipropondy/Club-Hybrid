@@ -420,20 +420,28 @@ export default function LoginScreen() {
     setError("");
     const activeApi = getApiUrl();
     const abortCtrl = new AbortController();
-    const timeoutId = setTimeout(() => abortCtrl.abort(), 3500); // 3.5s timeout for fast offline fallback
+    const timeoutId = setTimeout(() => abortCtrl.abort(), 8000); // 8s timeout for mobile Wi-Fi latency
 
     try {
+      const currentSessionId = useAuthStore.getState().sessionId;
       const response = await fetch(`${activeApi}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userName: userName.trim(), password }),
+        body: JSON.stringify({ userName: userName.trim(), password, sessionId: currentSessionId }),
         signal: abortCtrl.signal,
       });
       clearTimeout(timeoutId);
 
       const data = await response.json();
+
+      if (response.status === 409 || data.isLocked) {
+        setError(data.message || "This account is already logged in on another device.");
+        shakeError();
+        return;
+      }
+
       if (data.success && data.user) {
-        setUser(data.user, data.token);
+        setUser(data.user, data.token, null, data.sessionId);
 
         // Cache authenticated user and password locally for 100% offline tablet usage
         try {
@@ -543,7 +551,7 @@ export default function LoginScreen() {
           }
           return;
         } else {
-          setError(offlineResult.message || "Cannot connect to Counter server. Please check Wi-Fi & IP.");
+          setError(`Cannot connect to Counter server (${activeApi}). Ensure phone & server are on the same Wi-Fi and Windows Network is Private.`);
           shakeError();
         }
       } else {

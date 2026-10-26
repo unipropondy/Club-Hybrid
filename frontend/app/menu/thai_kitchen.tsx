@@ -52,7 +52,14 @@ import { useBarcodeScanner } from "../../hooks/useBarcodeScanner";
 
 const EMPTY_ARRAY: any[] = [];
 
-const IMAGE_BASE_URL = `${API_URL}/api/menu/image/`;
+const getDishImageUrl = (image: string | null | undefined): string | null => {
+  if (!image) return null;
+  const trimmed = String(image).trim();
+  if (!trimmed || trimmed === "null" || trimmed === "undefined") return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const baseUrl = getApiUrl().replace(/\/+$/, "");
+  return `${baseUrl}/api/menu/image/${encodeURIComponent(trimmed)}`;
+};
 
 // --- COMPONENTS ---
 
@@ -108,6 +115,17 @@ const DishCard = React.memo(
     const isSC =
       (Number(dish.isServiceCharge) === 1 || dish.isServiceCharge === true) &&
       useGeneralSettingsStore.getState().settings.SVCIdentification !== false;
+
+    const [imgError, setImgError] = useState(false);
+    const imageUrl = useMemo(
+      () => (!imgError && dish.Image ? getDishImageUrl(dish.Image) : null),
+      [dish?.Image, imgError]
+    );
+
+    useEffect(() => {
+      setImgError(false);
+    }, [dish?.DishId, dish?.Image]);
+
     return (
       <Pressable
         style={({ pressed }: { pressed: boolean }) => [
@@ -159,12 +177,13 @@ const DishCard = React.memo(
                 : null,
           ]}
         >
-          {dish.Image ? (
+          {imageUrl ? (
             <Image
-              source={{ uri: `${IMAGE_BASE_URL}${dish.Image}` }}
+              source={{ uri: imageUrl }}
               style={styles.dishImg}
               contentFit="cover"
               transition={150}
+              onError={() => setImgError(true)}
             />
           ) : (
             <View
@@ -1177,9 +1196,10 @@ export default function MenuScreen() {
       const addToCartSimple = (overridePrice?: number) => {
         const selectedGroupObj = groups.find((g: any) => g.DishGroupId === selectedGroup);
         const dishGroupName =
-          selectedGroupObj?.DishGroupName ||
           dish.DishGroupName ||
-          dish.dishGroupName;
+          dish.dishGroupName ||
+          selectedGroupObj?.DishGroupName ||
+          "";
         const groupPrefix = dishGroupName ? `${dishGroupName} - ` : "";
         addToCartGlobal({
           id: dish.DishId,
@@ -1192,7 +1212,7 @@ export default function MenuScreen() {
           isServiceCharge: dish.isServiceCharge,
           IsOpenItem: dish.IsOpenItem,
           TakeawayCharge: dish.TakeawayCharge !== undefined ? dish.TakeawayCharge : null,
-          dishGroupId: selectedGroupObj?.DishGroupId || dish.DishGroupId || dish.dishGroupId,
+          dishGroupId: dish.DishGroupId || dish.dishGroupId || selectedGroupObj?.DishGroupId,
           dishGroupName: dishGroupName,
           subCategoryName: dishGroupName,
           DishCode: dish.DishCode || dish.dishCode,
@@ -1488,9 +1508,10 @@ export default function MenuScreen() {
 
       const selectedGroupObj = groups.find((g: any) => g.DishGroupId === selectedGroup);
       const dishGroupName =
-        selectedGroupObj?.DishGroupName ||
         selectedDish.DishGroupName ||
-        selectedDish.dishGroupName;
+        selectedDish.dishGroupName ||
+        selectedGroupObj?.DishGroupName ||
+        "";
       const groupPrefix = dishGroupName ? `${dishGroupName} - ` : "";
 
       addToCartGlobal({
@@ -1506,7 +1527,7 @@ export default function MenuScreen() {
         splitMembers: selectedDish.splitMembers || undefined,
         isServiceCharge: selectedDish.isServiceCharge,
         TakeawayCharge: selectedDish.TakeawayCharge !== undefined ? selectedDish.TakeawayCharge : null,
-        dishGroupId: selectedGroupObj?.DishGroupId || selectedDish.DishGroupId || selectedDish.dishGroupId,
+        dishGroupId: selectedDish.DishGroupId || selectedDish.dishGroupId || selectedGroupObj?.DishGroupId,
         dishGroupName: dishGroupName,
         subCategoryName: dishGroupName,
       } as any);
@@ -1538,9 +1559,10 @@ export default function MenuScreen() {
 
     const selectedGroupObj = groups.find((g: any) => g.DishGroupId === selectedGroup);
     const dishGroupName =
-      selectedGroupObj?.DishGroupName ||
       dish.DishGroupName ||
-      dish.dishGroupName;
+      dish.dishGroupName ||
+      selectedGroupObj?.DishGroupName ||
+      "";
     const groupPrefix = dishGroupName ? `${dishGroupName} - ` : "";
 
     addToCartGlobal({
@@ -1554,7 +1576,7 @@ export default function MenuScreen() {
       IsOpenItem: dish.IsOpenItem,
       isServiceCharge: dish.isServiceCharge,
       TakeawayCharge: dish.TakeawayCharge !== undefined ? dish.TakeawayCharge : null,
-      dishGroupId: selectedGroupObj?.DishGroupId || dish.DishGroupId || dish.dishGroupId,
+      dishGroupId: dish.DishGroupId || dish.dishGroupId || selectedGroupObj?.DishGroupId,
       dishGroupName: dishGroupName,
       subCategoryName: dishGroupName,
     } as any);

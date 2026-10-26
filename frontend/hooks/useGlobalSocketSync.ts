@@ -90,6 +90,11 @@ export function useGlobalSocketSync() {
       appendOrder(payload.orderId, payload.context, payload.items, payload.createdAt);
       markItemsSent(payload.orderId);
 
+      // 🔄 Real-time Cart Refresh: Update this table's cart store so items become 'SENT'
+      if (payload?.context?.tableId) {
+        useCartStore.getState().fetchCartFromDB(payload.context.tableId);
+      }
+
       // 🔔 Play the success synth chime globally on every device
       try {
         const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
@@ -260,12 +265,20 @@ export function useGlobalSocketSync() {
         console.log(`✨ [Socket-Global] Item ${payload.status}:`, cleanLineItemId);
       }
       
-      if (payload.status === "READY") {
+      const normStatus = (payload.status || "").toUpperCase();
+      if (normStatus === "READY") {
         markItemReady(payload.orderId, cleanLineItemId, true);
-      } else if (payload.status === "SERVED") {
+        useCartStore.getState().updateItemStatus(cleanLineItemId, "READY");
+      } else if (normStatus === "SERVED") {
         markItemServed(payload.orderId, cleanLineItemId, true);
-      } else if (payload.status === "VOIDED") {
+        useCartStore.getState().updateItemStatus(cleanLineItemId, "SERVED");
+      } else if (normStatus === "VOIDED") {
         voidOrderItem(payload.orderId, cleanLineItemId);
+        useCartStore.getState().updateItemStatus(cleanLineItemId, "VOIDED");
+      } else if (normStatus === "HOLD") {
+        useCartStore.getState().updateItemStatus(cleanLineItemId, "HOLD");
+      } else if (normStatus === "SENT") {
+        useCartStore.getState().updateItemStatus(cleanLineItemId, "SENT");
       }
 
       const currentOrder = useOrderContextStore.getState().currentOrder;
@@ -279,28 +292,23 @@ export function useGlobalSocketSync() {
     };
 
     // --- 4. CART UPDATED ---
-    const handleCartUpdated = (data: { tableId: string }) => {
+    const handleCartUpdated = (data: { tableId: string; orderId?: string }) => {
+      if (!data?.tableId) return;
+      const cleanTargetTableId = String(data.tableId).replace(/^{|\}$/g, "").trim().toLowerCase();
       if (__DEV__) {
-        console.log("🛒 [Socket-Global] Cart updated (DB Sync) for Table:", data.tableId);
+        console.log("🛒 [Socket-Global] Cart updated (DB Sync) for Table:", cleanTargetTableId);
       }
+      
       const currentOrder = useOrderContextStore.getState().currentOrder;
-      if (data.tableId && data.tableId === currentOrder?.tableId) {
-        const cartStore = useCartStore.getState();
-        const contextId = cartStore.currentContextId;
-        if (contextId) {
-          const lastLocal = cartStore.lastLocalUpdate[contextId] || 0;
-          const lastSync = cartStore.lastServerSync[contextId] || 0;
-          if (lastLocal > 0 && lastSync >= lastLocal) {
-            if (__DEV__) {
-              console.log(`🛡️ [Socket-Global] Skipping redundant cart fetch for Table: ${data.tableId}. Local client is already synchronized.`);
-            }
-            return;
-          }
-        }
-        // Lower priority than cart_change relay
-        throttledFetch(data.tableId, 2000); 
+      const cleanCurrentTableId = currentOrder?.tableId
+        ? String(currentOrder.tableId).replace(/^{|\}$/g, "").trim().toLowerCase()
+        : null;
+
+      if (cleanCurrentTableId && cleanCurrentTableId === cleanTargetTableId) {
+        throttledFetch(cleanTargetTableId, 300);
+      } else {
+        useCartStore.getState().fetchCartFromDB(cleanTargetTableId);
       }
-      // 🚀 Removed fetchActiveKitchenOrders() here to stop API spam on every single cart modification
     };
 
     // --- 5. ORDER STATUS (CLOSE/VOID) ---

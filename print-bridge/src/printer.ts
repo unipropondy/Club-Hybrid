@@ -37,8 +37,8 @@ function parseFormatting(content: string): Buffer {
     }
   }
   
-  // Append line feeds and paper cut command (GS V 66 0)
-  chunks.push(Buffer.from([0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x42, 0x00]));
+  // Append minimal line feed and paper cut command (GS V 66 0)
+  chunks.push(Buffer.from([0x0A, 0x1D, 0x56, 0x42, 0x00]));
   
   return Buffer.concat(chunks);
 }

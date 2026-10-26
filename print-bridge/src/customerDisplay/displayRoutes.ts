@@ -39,4 +39,18 @@ router.get('/health', (_req, res) => {
   });
 });
 
+// 5. GET /customer-display/standalone and UI paths - Serve SPA index.html directly
+router.get(['/standalone', '/customer-display-standalone', '/ui', '/'], (_req, res, next) => {
+  try {
+    const path = require('path');
+    const fs = require('fs');
+    const { getWebAssetsDir } = require('../index');
+    const indexPath = path.join(getWebAssetsDir(), 'index.html');
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+  } catch (_) {}
+  next();
+});
+
 export default router;

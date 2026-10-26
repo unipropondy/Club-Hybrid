@@ -1805,6 +1805,17 @@ export default function PaymentScreen() {
 
         // Navigate first — let the success screen mount fully before mutating store state
 
+        // 🖥️ Immediately sync Payment Success to Customer Display upon settlement
+        CustomerDisplaySync.isPaymentActive = false;
+        CustomerDisplaySync.isSuccessActive = true;
+        CustomerDisplaySync.syncPaymentSuccess({
+          orderId: result.billNo || result.orderId || displayOrderId || "",
+          total: total,
+          paid: (payments && payments.length > 0 ? total : paidNum),
+          change: (payments && payments.length > 0 ? 0 : change),
+          method: payments && payments.length > 0 ? "SPLIT" : method.trim(),
+        });
+
         router.push({
           pathname: "/payment_success" as any,
           params: {

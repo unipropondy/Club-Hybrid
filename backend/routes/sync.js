@@ -799,6 +799,7 @@ router.get("/pull", async (req, res) => {
           u.FullName as full_name,
           CASE WHEN u.IsDisabled = 1 THEN 1 ELSE 0 END as is_disabled,
           u.UserGroupid as user_group_id,
+          ISNULL(u.AllowedLogins, 1) as allowed_logins,
           ISNULL(g.UserGroupCode, 'CASHIER') as role,
           ISNULL(g.UserGroupName, 'Cashier') as role_name
         FROM UserMaster u WITH (NOLOCK)

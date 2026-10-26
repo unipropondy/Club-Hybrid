@@ -577,20 +577,24 @@ private static escapeHtml(str: string): string {
             justify-content: center;
             align-items: flex-start;
             width: 100%;
-            min-height: 100vh;
+            height: auto;
+            min-height: auto;
           }
  
           @media print {
-            @page { margin: 0; }
-            body { background: white; }
+            @page { margin: 0; size: auto; }
+            body { background: white; margin: 0; padding: 0; }
             .print-wrapper {
               display: flex !important;
               justify-content: center !important;
+              height: auto !important;
+              min-height: auto !important;
             }
             .receipt {
               margin: 0 !important;
               box-shadow: none !important;
               width: 72mm !important;
+              padding: 4mm 4mm 2mm 4mm !important;
             }
           }
           
@@ -598,7 +602,7 @@ private static escapeHtml(str: string): string {
             width: 72mm;
             max-width: 72mm;
             background: white;
-            padding: 4mm;
+            padding: 4mm 4mm 2mm 4mm;
             box-shadow: 0 0 10px rgba(0,0,0,0.1); /* Visible on screen */
           }
           
@@ -780,12 +784,14 @@ private static escapeHtml(str: string): string {
           .footer {
             text-align: center;
             padding-top: 2mm;
+            padding-bottom: 0;
+            margin-bottom: 0;
             border-top: 1.5px solid #000;
             font-family: monospace;
           }
           
           .thankyou { font-size: 13px; font-weight: 800; margin-bottom: 1mm; }
-          .copyright { font-size: 11px; font-weight: 900; color: #000; }
+          .copyright { font-size: 11px; font-weight: 900; color: #000; margin: 0; padding: 0; }
         </style>
       </head>
       <body>

@@ -52,6 +52,8 @@ function buildConfig({ server, port, database, user, password }, useInstance = t
 
 let activeConfig = null;
 let activePoolInstance = null;
+let localConfigInstance = null;
+let remoteConfig = null;
 
 async function connectWithFallback() {
   const localServerRaw = process.env.LOCAL_DB_SERVER || "localhost\\ups";
@@ -61,7 +63,7 @@ async function connectWithFallback() {
   const localPort = process.env.LOCAL_DB_PORT || "1433";
 
   // Strategy 1: Named Instance (localhost\ups)
-  const localConfigInstance = buildConfig({
+  localConfigInstance = buildConfig({
     server: localServerRaw,
     port: localPort,
     database: localDb,
@@ -78,7 +80,7 @@ async function connectWithFallback() {
     password: localPass,
   }, false);
 
-  const remoteConfig = buildConfig({
+  remoteConfig = buildConfig({
     server: process.env.REMOTE_DB_SERVER || process.env.DB_SERVER,
     port: process.env.REMOTE_DB_PORT || process.env.DB_PORT,
     database: process.env.REMOTE_DB_NAME || process.env.DB_NAME,

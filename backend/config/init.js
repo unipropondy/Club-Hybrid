@@ -6294,8 +6294,43 @@ async function initDB(pool) {
               [CurrentVoidAmount] [DECIMAL](18, 2) NULL DEFAULT ((0)),
               [CurrentCancelAmount] [DECIMAL](18, 2) NULL DEFAULT ((0)),
               [FromDate] [DATE] NULL,
-              [ToDate] [DATE] NULL
+              [ToDate] [DATE] NULL,
+              [IsLoggedIn] [BIT] NULL DEFAULT ((0)),
+              [LastHeartbeat] [DATETIME] NULL,
+              [ActiveSessionId] [VARCHAR](100) NULL
           )
+      END
+
+      -- Self-heal session columns for UserMaster
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'UserMaster' AND COLUMN_NAME = 'IsLoggedIn')
+      BEGIN
+          ALTER TABLE [dbo].[UserMaster] ADD [IsLoggedIn] [BIT] NULL DEFAULT ((0)) WITH VALUES;
+      END
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'UserMaster' AND COLUMN_NAME = 'LastHeartbeat')
+      BEGIN
+          ALTER TABLE [dbo].[UserMaster] ADD [LastHeartbeat] [DATETIME] NULL;
+      END
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'UserMaster' AND COLUMN_NAME = 'ActiveSessionId')
+      BEGIN
+          ALTER TABLE [dbo].[UserMaster] ADD [ActiveSessionId] [VARCHAR](100) NULL;
+      END
+      IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'UserMaster' AND COLUMN_NAME = 'AllowedLogins')
+      BEGIN
+          ALTER TABLE [dbo].[UserMaster] ADD [AllowedLogins] [INT] NULL DEFAULT ((1)) WITH VALUES;
+      END
+
+      -- Multi-Device Concurrent Session Tracker
+      IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[UserSessions]') AND type in (N'U'))
+      BEGIN
+          CREATE TABLE [dbo].[UserSessions](
+              [SessionId] [VARCHAR](100) NOT NULL PRIMARY KEY,
+              [UserId] [VARCHAR](100) NOT NULL,
+              [DeviceName] [NVARCHAR](100) NULL,
+              [IpAddress] [VARCHAR](50) NULL,
+              [CreatedAt] [DATETIME] NULL DEFAULT (GETDATE()),
+              [LastHeartbeat] [DATETIME] NULL DEFAULT (GETDATE())
+          );
+          CREATE INDEX [IX_UserSessions_UserId] ON [dbo].[UserSessions]([UserId]);
       END
     `);
 

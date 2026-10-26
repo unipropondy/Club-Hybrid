@@ -1234,6 +1234,9 @@ async function pullMasterFromCloud(ioInstance = null) {
     // 7. Sync Artist Targets (dishOrderItemShare)
     await syncArtistTargetsAndBonuses(remotePool, localPool);
 
+    // 8. Pull Users & AllowedLogins from Cloud
+    await syncUsersFromCloud(remotePool, localPool);
+
     console.log(`✅ [CloudSync] Master data pull complete (${remoteDishes.recordset.length} dishes, ${remoteTables.recordset.length} tables synced).`);
 
     if (ioInstance) {
@@ -1677,9 +1680,48 @@ async function syncSettingsAndSequences(remotePool, localPool) {
         `).catch(() => {});
     }
 
-    console.log(`✅ [CloudSync] Settings, printer IPs & order sequences synchronized.`);
+    // 5. DateEntry: Synchronize active business day state with Cloud ERP
+    await syncDateEntryToCloud(localPool, remotePool).catch((err) => {
+      console.warn("⚠️ [CloudSync DateEntry Notice]:", err.message);
+    });
+
+    console.log(`✅ [CloudSync] Settings, printer IPs, order sequences & DateEntry synchronized.`);
   } catch (err) {
     console.warn("⚠️ [CloudSync Settings Notice]:", err.message);
+  }
+}
+
+/**
+ * Synchronizes DateEntry (Active Business Day) between Local POS and Cloud ERP.
+ * Pushes active StartDate on Day Start, and clears Cloud DateEntry on Day End.
+ */
+async function syncDateEntryToCloud(localPool = null, remotePool = null) {
+  try {
+    const lPool = localPool || getPool() || (await poolPromise);
+    const rPool = remotePool || (await getRemotePool());
+
+    const locDate = await lPool.request().query("SELECT TOP 1 * FROM DateEntry WITH (NOLOCK) ORDER BY CreatedDate DESC").catch(() => ({ recordset: [] }));
+    if (locDate.recordset.length > 0) {
+      const ld = locDate.recordset[0];
+      await rPool.request().query("DELETE FROM DateEntry").catch(() => {});
+      await rPool.request()
+        .input("id", sql.UniqueIdentifier, ld.DateEntryId)
+        .input("user", sql.VarChar(30), ld.username || "admin")
+        .input("dt", sql.Date, ld.StartDate)
+        .input("cby", sql.VarChar(30), ld.Createdby || ld.CreatedBy || "admin")
+        .input("cdate", sql.DateTime, ld.CreatedDate)
+        .query(`
+          INSERT INTO DateEntry (DateEntryId, username, StartDate, CreatedBy, CreatedDate)
+          VALUES (@id, @user, @dt, @cby, @cdate)
+        `);
+      console.log(`☁️ [CloudSync] DateEntry synchronized to Cloud ERP: ${ld.StartDate ? new Date(ld.StartDate).toISOString().split('T')[0] : 'Active'}`);
+    } else {
+      // Local is in Day-End state; clear remote DateEntry to match
+      await rPool.request().query("DELETE FROM DateEntry").catch(() => {});
+      console.log("☁️ [CloudSync] Cloud ERP DateEntry cleared (Day-End state synchronized).");
+    }
+  } catch (err) {
+    console.warn("⚠️ [CloudSync DateEntry Sync Error]:", err.message);
   }
 }
 
@@ -1928,6 +1970,63 @@ async function getSyncStatus() {
   }
 }
 
+/**
+ * Synchronizes UserMaster (including AllowedLogins) from Central Cloud ERP to Local DB.
+ * Allows online backoffice to configure device login limits (1, 2, or 0/unlimited).
+ * NEVER overwrites local session tracking (IsLoggedIn, ActiveSessionId, LastHeartbeat).
+ */
+async function syncUsersFromCloud(remotePool, localPool) {
+  try {
+    const remoteUsers = await remotePool.request().query(`
+      SELECT 
+        UserId, UserCode, UserName, UserPassword, FullName, FirstName, LastName,
+        IsDisabled, UserGroupid, AllowedLogins
+      FROM UserMaster WITH (NOLOCK)
+    `).catch(() => ({ recordset: [] }));
+
+    for (const u of remoteUsers.recordset) {
+      await localPool.request()
+        .input("id", sql.UniqueIdentifier, u.UserId)
+        .input("code", sql.NVarChar(50), u.UserCode || null)
+        .input("name", sql.NVarChar(100), u.UserName)
+        .input("pwd", sql.NVarChar(255), u.UserPassword)
+        .input("fullName", sql.NVarChar(200), u.FullName || null)
+        .input("firstName", sql.NVarChar(100), u.FirstName || null)
+        .input("lastName", sql.NVarChar(100), u.LastName || null)
+        .input("disabled", sql.Bit, u.IsDisabled ? 1 : 0)
+        .input("groupId", sql.UniqueIdentifier, u.UserGroupid || null)
+        .input("allowedLogins", sql.Int, u.AllowedLogins !== null && u.AllowedLogins !== undefined ? u.AllowedLogins : 1)
+        .query(`
+          IF EXISTS (SELECT 1 FROM UserMaster WHERE UserId = @id)
+            UPDATE UserMaster 
+            SET AllowedLogins = @allowedLogins,
+                UserCode = ISNULL(@code, UserCode),
+                UserName = ISNULL(@name, UserName),
+                FullName = ISNULL(@fullName, FullName),
+                FirstName = ISNULL(@firstName, FirstName),
+                LastName = ISNULL(@lastName, LastName),
+                IsDisabled = @disabled,
+                UserGroupid = ISNULL(@groupId, UserGroupid)
+            WHERE UserId = @id
+          ELSE
+            INSERT INTO UserMaster (
+              UserId, UserCode, UserName, UserPassword, FullName, FirstName, LastName, 
+              IsDisabled, UserGroupid, AllowedLogins, IsLoggedIn
+            )
+            VALUES (
+              @id, @code, @name, @pwd, @fullName, @firstName, @lastName, 
+              @disabled, @groupId, @allowedLogins, 0
+            )
+        `).catch((err) => {
+          console.warn(`⚠️ [CloudSync] Error syncing user ${u.UserName}:`, err.message);
+        });
+    }
+    console.log(`✅ [CloudSync] Synchronized ${remoteUsers.recordset.length} users and AllowedLogins from Cloud ERP.`);
+  } catch (uErr) {
+    console.warn("⚠️ [CloudSync] UserMaster pull warning:", uErr.message);
+  }
+}
+
 module.exports = {
   pushSalesToCloud,
   pullSalesFromCloud,
@@ -1937,7 +2036,9 @@ module.exports = {
   syncMembersAndCreditCustomers,
   syncStaffAttendance,
   syncSettingsAndSequences,
+  syncDateEntryToCloud,
   syncArtistTargetsAndBonuses,
+  syncUsersFromCloud,
   getSyncStatus,
   getRemotePool,
 };

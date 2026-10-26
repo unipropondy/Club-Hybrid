@@ -493,11 +493,36 @@ const CartItemRow = React.memo(
     tableStatus,
     isDeleting,
   }: any) => {
-    const isSent = isItemSent(item);
-    const isVoided =
-      item.status === "VOIDED" ||
-      item.StatusCode === 0 ||
-      item.statusCode === 0;
+    const statusCode = item.StatusCode !== undefined ? item.StatusCode : (item.statusCode !== undefined ? item.statusCode : null);
+    const itemStatus: "NEW" | "SENT" | "READY" | "SERVED" | "HOLD" | "VOIDED" =
+      (statusCode === 0 || item.status === "VOIDED" || item.isVoided) ? "VOIDED" :
+      (statusCode === 1 || item.status === "NEW") ? "NEW" :
+      (statusCode === 4 || item.status === "SERVED") ? "SERVED" :
+      (statusCode === 3 || item.status === "READY") ? "READY" :
+      (statusCode === 5 || item.status === "HOLD") ? "HOLD" :
+      (statusCode === 2 || item.status === "SENT" || item.sent === 1) ? "SENT" : "NEW";
+
+    const isSent = itemStatus !== "NEW";
+    const isVoided = itemStatus === "VOIDED";
+
+    const getStatusConfig = () => {
+      switch (itemStatus) {
+        case "READY":
+          return { bg: "#2563EB18", border: "#2563EB45", text: "#2563EB", bar: "#22C55E", label: "READY" };
+        case "SERVED":
+          return { bg: "#10B98118", border: "#10B98145", text: "#059669", bar: "#22C55E", label: "SERVED" };
+        case "HOLD":
+          return { bg: "#F59E0B18", border: "#F59E0B45", text: "#D97706", bar: "#F59E0B", label: "HOLD" };
+        case "VOIDED":
+          return { bg: Theme.danger + "18", border: Theme.danger + "40", text: Theme.danger, bar: Theme.danger, label: "VOIDED" };
+        case "SENT":
+          return { bg: "#22C55E18", border: "#22C55E35", text: "#16A34A", bar: "#22C55E", label: "SENT" };
+        case "NEW":
+        default:
+          return { bg: "#3B82F618", border: "#3B82F635", text: "#2563EB", bar: "#3B82F6", label: "NEW" };
+      }
+    };
+    const statusCfg = getStatusConfig();
 
     const isTakeawayItem = item.isTakeaway || item.IsTakeaway || item.isTakeAway || item.IsTakeAway;
     const isSC = !isTakeawayItem && (Number(item.isServiceCharge) === 1 || item.isServiceCharge === true) && useGeneralSettingsStore.getState().settings.SVCIdentification !== false;
@@ -514,7 +539,7 @@ const CartItemRow = React.memo(
         <View
           style={[
             styles.statusBar,
-            { backgroundColor: isSent ? "#22C55E" : "#3B82F6" },
+            { backgroundColor: statusCfg.bar },
           ]}
         />
         <Pressable
@@ -645,16 +670,9 @@ const CartItemRow = React.memo(
                 style={[
                   styles.statusTag,
                   {
-                    backgroundColor: isVoided
-                      ? Theme.danger + "10"
-                      : isSent
-                        ? "#22C55E15"
-                        : "#3B82F615",
-                    borderColor: isVoided
-                      ? Theme.danger + "30"
-                      : isSent
-                        ? "#22C55E30"
-                        : "#3B82F630",
+                    backgroundColor: statusCfg.bg,
+                    borderColor: statusCfg.border,
+                    borderWidth: 1,
                     paddingVertical: isPhone ? 2 : 4,
                   },
                 ]}
@@ -664,15 +682,12 @@ const CartItemRow = React.memo(
                     styles.statusTagText,
                     {
                       fontSize: isPhone ? 8 : 9,
-                      color: isVoided
-                        ? Theme.danger
-                        : isSent
-                          ? "#15803D"
-                          : "#1D4ED8",
+                      fontFamily: Fonts.bold,
+                      color: statusCfg.text,
                     },
                   ]}
                 >
-                  {isVoided ? "VOIDED" : isSent ? "SENT" : "NEW"}
+                  {statusCfg.label}
                 </Text>
               </View>
             </View>

@@ -17,6 +17,7 @@ import {
   launchCustomerDisplay,
   closeCustomerDisplay,
   pushStateToDisplay,
+  updateCustomerDisplayBounds,
 } from './customerDisplay/CustomerDisplayManager';
 import { loadPersistedState, getCurrentState } from './customerDisplay/DisplayStateStore';
 import displayRouter from './customerDisplay/displayRoutes';
@@ -380,7 +381,10 @@ app.get('*', (req: Request, res: Response, next) => {
     req.path.startsWith('/api') ||
     req.path.startsWith('/uploads') ||
     req.path.startsWith('/settings') ||
-    req.path.startsWith('/customer-display') ||
+    req.path === '/customer-display/update' ||
+    req.path === '/customer-display/clear' ||
+    req.path === '/customer-display/status' ||
+    req.path === '/customer-display/health' ||
     req.path === '/health' ||
     req.path === '/is-ready'
   ) {
@@ -491,11 +495,11 @@ electronApp.whenReady().then(async () => {
     // Handle display changes (added/removed/metrics changes)
     monitorEvents.on('display-changed', () => {
       if (getSecondaryDisplay()) {
-        launchCustomerDisplay();
+        updateCustomerDisplayBounds();
         // Re-push the current state so the display isn't blank/stale after connecting
         setTimeout(() => {
           pushStateToDisplay(getCurrentState());
-        }, 2000);
+        }, 1500);
       } else {
         closeCustomerDisplay();
       }

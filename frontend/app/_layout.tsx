@@ -41,8 +41,6 @@ import { useTerminalStore } from "@/stores/terminalStore";
 
 // ── Offline Tablet Sync: Auto-syncs SQLite orders to Counter PC ──
 function OfflineSyncRunner() {
-  if (Platform.OS === "web") return null;
-
   const [apiUrl, setApiUrlState] = React.useState(getApiUrl());
 
   useEffect(() => {
@@ -268,7 +266,7 @@ function SocketToastListener() {
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
-import { useAuthStore } from "@/stores/authStore";
+import { useAuthStore, startHeartbeat, stopHeartbeat } from "@/stores/authStore";
 import { useRouter, useSegments } from "expo-router";
 import * as SystemUI from "expo-system-ui";
 import { Theme } from "@/constants/theme";
@@ -459,7 +457,7 @@ global.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Pr
         lastError = err;
 
         const isTimeout = err.name === 'AbortError';
-        const isNetwork = err instanceof TypeError || err.message?.includes('Network request failed');
+        const isNetwork = err instanceof TypeError || err.name === 'TypeError' || err.message?.includes('Network request failed') || err.message?.toLowerCase().includes('fetch failed');
 
         if (!isTimeout && !isNetwork) {
           if (__DEV__) {
@@ -594,6 +592,16 @@ export default function RootLayout() {
     }
   }, [user, segments, fontsLoaded, authHydrated]);
 
+  // 💓 HEARTBEAT: Maintain active session while logged in and mounted
+  useEffect(() => {
+    if (user && authHydrated) {
+      startHeartbeat();
+    }
+    return () => {
+      stopHeartbeat();
+    };
+  }, [user, authHydrated]);
+
   useEffect(() => {
     if ((fontsLoaded || fontError) && authHydrated) {
       SplashScreen.hideAsync();
@@ -611,7 +619,7 @@ export default function RootLayout() {
           {/* 🔔 Staff Toaster alerts for QR orders & Table Service requests */}
           <SocketToastListener />
           {/* 📱 Offline Tablet Sync: Auto-syncs SQLite orders to Counter PC */}
-          <OfflineSyncRunner />
+          {Platform.OS !== "web" && <OfflineSyncRunner />}
           {/* 🖥️ Customer Display: auto-projects onto Sunmi D3 secondary screen */}
           <CustomerDisplayManager isPOSReady={isPOSReady} />
           <Stack screenOptions={{ headerShown: false }}>

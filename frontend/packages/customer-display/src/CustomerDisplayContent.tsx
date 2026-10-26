@@ -104,20 +104,19 @@ export default function CustomerDisplayContent() {
   };
 
   const [displayState, setDisplayState] = useState<DisplayState>(DEFAULT_STATE);
-  const [floatingFoods, setFloatingFoods] = useState<any[]>([]);
 
-  // â”€â”€â”€ TERMINAL PAIRING STATE â”€â”€â”€
+  // Terminal pairing state — never show modal automatically on load
   const terminalCode = useTerminalStore((s: any) => s.terminalCode);
   const terminalName = useTerminalStore((s: any) => s.terminalName);
   const isTerminalConfigured = useTerminalStore((s: any) => s.isConfigured);
-  const [showTerminalModal, setShowTerminalModal] = useState(!isTerminalConfigured);
+  const [showTerminalModal, setShowTerminalModal] = useState(false);
   const [terminals, setTerminals] = useState<Terminal[]>([]);
   const [terminalsLoading, setTerminalsLoading] = useState(false);
   const [selectedTerminalCode, setSelectedTerminalCode] = useState<string | null>(null);
 
-  // Animation value for success screen fade/scale
-  const successScale = useRef(new Animated.Value(0)).current;
-  const successOpacity = useRef(new Animated.Value(0)).current;
+  // Animation value for success screen fade/scale — default to 1 so success screen is immediately visible on web
+  const successScale = useRef(new Animated.Value(1)).current;
+  const successOpacity = useRef(new Animated.Value(1)).current;
 
   // 1. Initialize settings, socket listener & terminal room join
   useEffect(() => {
@@ -266,85 +265,32 @@ export default function CustomerDisplayContent() {
   }, [showTerminalModal]);
 
 
-  // 2. Success screen trigger
+  // 2. Success screen entrance animation
   useEffect(() => {
     if (displayState.paymentSuccess) {
-      // Animate success screen entrance
-      Animated.parallel([
-        Animated.spring(successScale, {
-          toValue: 1,
-          tension: 40,
-          friction: 6,
-          useNativeDriver: true,
-        }),
-        Animated.timing(successOpacity, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-      ]).start();
-    } else {
-      successScale.setValue(0);
-      successOpacity.setValue(0);
+      if (Platform.OS !== 'web') {
+        successScale.setValue(0.85);
+        successOpacity.setValue(0);
+        Animated.parallel([
+          Animated.spring(successScale, {
+            toValue: 1,
+            tension: 45,
+            friction: 7,
+            useNativeDriver: true,
+          }),
+          Animated.timing(successOpacity, {
+            toValue: 1,
+            duration: 250,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      } else {
+        // Web / Electron: Ensure 100% solid visibility with zero blank screen risk
+        successScale.setValue(1);
+        successOpacity.setValue(1);
+      }
     }
   }, [displayState.paymentSuccess]);
-
-  // 3. Spawning popping food animations for Attract Loop
-  useEffect(() => {
-    if (displayState.active) {
-      setFloatingFoods([]);
-      return;
-    }
-
-    const icons = [
-      "pizza-outline",
-      "cafe-outline",
-      "ice-cream-outline",
-      "restaurant-outline",
-      "beer-outline",
-      "fast-food-outline",
-    ];
-
-    const interval = setInterval(() => {
-      const id = Math.random().toString();
-      const icon = icons[Math.floor(Math.random() * icons.length)];
-      // Spawn coordinates (percentage of screen viewport)
-      const x = Math.random() * 80 + 10;
-      const y = Math.random() * 70 + 15;
-
-      const scale = new Animated.Value(0);
-      const translateY = new Animated.Value(0);
-      const opacity = new Animated.Value(1);
-
-      const newItem = { id, icon, x, y, scale, translateY, opacity };
-      setFloatingFoods((prev: any[]) => [...prev, newItem].slice(-15)); // Keep max 15 on screen
-
-      Animated.parallel([
-        Animated.spring(scale, {
-          toValue: 1.3,
-          tension: 30,
-          friction: 4,
-          useNativeDriver: true,
-        }),
-        Animated.timing(translateY, {
-          toValue: -80 - Math.random() * 50,
-          duration: 3500,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 0,
-          delay: 2200,
-          duration: 1000,
-          useNativeDriver: true,
-        }),
-      ]).start(() => {
-        // Clean up from state once finished
-        setFloatingFoods((prev: any[]) => prev.filter((item: any) => item.id !== id));
-      });
-    }, 900);
-
-    return () => clearInterval(interval);
-  }, [displayState.active]);
 
   // 4. Generate UPI QR URL
   const upiUrl = (() => {
@@ -464,8 +410,8 @@ export default function CustomerDisplayContent() {
     </Modal>
   );
 
-  // Success view
-  if (displayState.paymentSuccess && paymentSettings.customerSideDisplay) {
+  // Success view — always show when payment is successful
+  if (displayState.paymentSuccess) {
     return (
       <View style={styles.successContainer}>
         {renderTerminalModal()}
@@ -807,8 +753,8 @@ export default function CustomerDisplayContent() {
               showsVerticalScrollIndicator={false}
               style={styles.receiptItemsScroll}
             >
-              {displayState.items.map((item: any, idx: number) => {
-                const allItemsHaveSC = displayState.items.every((i: any) => (Number(i.isServiceCharge) === 1 || i.isServiceCharge === true));
+              {(displayState.items || []).map((item: any, idx: number) => {
+                const allItemsHaveSC = (displayState.items || []).every((i: any) => (Number(i.isServiceCharge) === 1 || i.isServiceCharge === true));
                 return (
                   <View
                     key={String(item.lineItemId ? `${item.lineItemId}-${idx}` : idx)}
@@ -933,7 +879,7 @@ export default function CustomerDisplayContent() {
                 {displayState.serviceChargeAmount && displayState.serviceChargeAmount > 0 ? (
                   <View style={styles.breakdownItem}>
                     <Text style={styles.breakdownLabel}>
-                      {displayState.items.every((i: any) => (Number(i.isServiceCharge) === 1 || i.isServiceCharge === true)) ? "Service Charge" : "Item Service Charge"} ({displayState.serviceChargePercentage || 0}%)
+                      {(displayState.items || []).every((i: any) => (Number(i.isServiceCharge) === 1 || i.isServiceCharge === true)) ? "Service Charge" : "Item Service Charge"} ({displayState.serviceChargePercentage || 0}%)
                     </Text>
                     <Text style={styles.breakdownValue}>
                       {companySettings.currencySymbol || "$"}
@@ -1008,26 +954,6 @@ export default function CustomerDisplayContent() {
           <Text style={[styles.terminalPillText, { color: "#ef4444" }]}>Set Terminal</Text>
         </TouchableOpacity>
       )}
-      {/* Floating popping food animations */}
-      {floatingFoods.map((item: any) => (
-        <Animated.View
-          key={item.id}
-          style={[
-            styles.floatingFood,
-            {
-              left: `${item.x}%`,
-              top: `${item.y}%`,
-              transform: [
-                { scale: item.scale },
-                { translateY: item.translateY },
-              ],
-              opacity: item.opacity,
-            },
-          ]}
-        >
-          <Ionicons name={item.icon} size={48} color={Theme.primary + "30"} />
-        </Animated.View>
-      ))}
 
       <View style={styles.idleMainContent}>
         {/* Main Branding Card */}

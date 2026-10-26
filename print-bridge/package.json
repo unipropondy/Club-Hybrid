@@ -30,7 +30,7 @@
     "appId": "com.unipro.poscounter",
     "productName": "Smart-Club POS UniPro",
     "directories": {
-      "output": "C:/unipro_build_output"
+      "output": "D:/unipro_build_output"
     },
     "files": [
       "dist/**/*",

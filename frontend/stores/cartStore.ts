@@ -45,6 +45,7 @@ export type CartItem = {
   isVoided?: boolean;
   categoryName?: string; 
   status?: "NEW" | "SENT" | "VOIDED" | "READY" | "SERVED" | "HOLD";
+  StatusCode?: number;
   DateCreated?: string | number;
   KitchenTypeName?: string;
   PrinterIP?: string;
@@ -259,11 +260,12 @@ const normalizeCartItem = (item: any, fallback: Partial<CartItem> = {}): CartIte
     oil: getNormalizedText(item.oil, item.Oil, fallback.oil),
     sugar: getNormalizedText(item.sugar, item.Sugar, fallback.sugar),
     isVoided: getNormalizedBoolean(item.isVoided, item.IsVoided, fallback.isVoided),
-    status: (item.StatusCode === 0 || item.statusCode === 0) ? "VOIDED" : 
-            (item.StatusCode === 3 || item.statusCode === 3) ? "READY" :
-            (item.StatusCode === 4 || item.statusCode === 4) ? "SERVED" :
-            (item.StatusCode === 5 || item.statusCode === 5) ? "HOLD" :
-            (item.StatusCode === 2 || item.statusCode === 2) ? "SENT" :
+    status: (item.StatusCode === 0 || item.statusCode === 0 || item.status === "VOIDED" || item.isVoided) ? "VOIDED" : 
+            (item.StatusCode === 1 || item.statusCode === 1 || item.status === "NEW" || fallback.status === "NEW") ? "NEW" :
+            (item.StatusCode === 3 || item.statusCode === 3 || item.status === "READY") ? "READY" :
+            (item.StatusCode === 4 || item.statusCode === 4 || item.status === "SERVED") ? "SERVED" :
+            (item.StatusCode === 5 || item.statusCode === 5 || item.status === "HOLD") ? "HOLD" :
+            (item.StatusCode === 2 || item.statusCode === 2 || item.status === "SENT") ? "SENT" :
             (item.status || item.Status || fallback.status || "NEW"),
     DateCreated: item.DateCreated || fallback.DateCreated,
     categoryName: item.categoryName || fallback.categoryName,
@@ -282,6 +284,8 @@ const normalizeCartItem = (item: any, fallback: Partial<CartItem> = {}): CartIte
     dishGroupName: item.dishGroupName || item.DishGroupName || item.subCategoryName || item.SubCategoryName || fallback.dishGroupName,
     subCategoryName: item.subCategoryName || item.SubCategoryName || item.dishGroupName || item.DishGroupName || fallback.subCategoryName,
     DishCode: item.DishCode || item.dishCode || fallback.DishCode,
+    StatusCode: item.StatusCode !== undefined ? item.StatusCode : (item.statusCode !== undefined ? item.statusCode : (fallback.StatusCode !== undefined ? fallback.StatusCode : (fallback.status === "NEW" || item.status === "NEW" ? 1 : 2))),
+    sent: (item.StatusCode === 1 || item.statusCode === 1 || item.status === "NEW" || fallback.status === "NEW") ? 0 : (item.StatusCode === 2 || item.status === "SENT" ? 1 : (item.sent ?? 0)),
   };
 };
 
@@ -382,6 +386,7 @@ type CartState = {
   updateCartItemTakeaway: (lineItemId: string, isTakeaway: boolean) => void;
   updateCartItemDiscount: (lineItemId: string, discount: number) => void;
   voidCartItem: (lineItemId: string) => void;
+  updateItemStatus: (lineItemId: string, status: "NEW" | "SENT" | "READY" | "SERVED" | "HOLD" | "VOIDED") => void;
   updateCartItemFull: (
     lineItemId: string,
     updates: {
@@ -669,9 +674,19 @@ export const useCartStore = create<CartState>()(
           };
         });
         
+        // 🚀 REAL-TIME BROADCAST: Broadcast 'SENT' status to all other devices (counter/tablets) immediately!
+        const tableId = useOrderContextStore.getState().currentOrder?.tableId;
+        if (tableId) {
+          socket.emit("cart_change", {
+            tableId,
+            contextId: currentContextId,
+            items: updatedCart,
+            lastUpdate: Date.now()
+          });
+        }
+
         // 🚀 IMMEDIATE SYNC: Don't wait for debounce when sending to kitchen
         if (!skipSync) {
-          const tableId = useOrderContextStore.getState().currentOrder?.tableId;
           if (tableId) {
             get().syncCartWithDB(currentContextId);
           }
@@ -1153,6 +1168,32 @@ export const useCartStore = create<CartState>()(
         }));
       },
 
+      updateItemStatus: (lineItemId: string, status: "NEW" | "SENT" | "READY" | "SERVED" | "HOLD" | "VOIDED") => {
+        const cleanId = String(lineItemId || "").replace(/^{|\}$/g, "").trim().toLowerCase();
+        set((state) => {
+          const newCarts = { ...state.carts };
+          let changed = false;
+          Object.keys(newCarts).forEach((ctx) => {
+            const items = newCarts[ctx] || [];
+            const idx = items.findIndex(
+              (i) => String(i.lineItemId || "").replace(/^{|\}$/g, "").trim().toLowerCase() === cleanId
+            );
+            if (idx > -1) {
+              const updated = [...items];
+              updated[idx] = {
+                ...updated[idx],
+                status,
+                isVoided: status === "VOIDED",
+                sent: status === "NEW" ? 0 : 1,
+              };
+              newCarts[ctx] = updated;
+              changed = true;
+            }
+          });
+          return changed ? { carts: newCarts } : state;
+        });
+      },
+
       updateCartItemFull: (lineItemId, updates) => {
         const { currentContextId } = get();
         if (!currentContextId) return;
@@ -1354,19 +1395,18 @@ export const useCartStore = create<CartState>()(
           try {
             const now = Date.now();
             const state = get();
-            const currentContext = state.currentContextId;
-            if (!currentContext) return;
+            const currentOrder = useOrderContextStore.getState().currentOrder;
+            const currentContext = state.currentContextId || (currentOrder?.tableId === tableId ? getContextId(currentOrder) : null);
+            if (!currentContext && !tableId) return;
 
             // 🛡️ CLEAR LOCK: Reject fetches during a manual clear
-            if (state.isClearing[currentContext]) {
+            if (currentContext && state.isClearing[currentContext]) {
               if (__DEV__) console.log(`🛡️ [TRACE] [${now}] [${currentContext}] fetchCartFromDB: BLOCKED (Clear Lock active)`);
               return;
             }
 
-            const lastEdit = state.lastLocalUpdate[currentContext] || 0;
+            const lastEdit = (currentContext ? state.lastLocalUpdate[currentContext] : 0) || 0;
             const timeSinceLastEdit = now - lastEdit;
-
-            if (__DEV__) console.log(`[TRACE] [${now}] [${currentContext}] fetchCartFromDB: START | Table: ${tableId} | LastEdit: ${timeSinceLastEdit}ms ago`);
 
             // 🛡️ DYNAMIC SHIELD: Latency protection
             if (timeSinceLastEdit < 1500 || lastEdit > fetchStartTime) {
@@ -1380,25 +1420,16 @@ export const useCartStore = create<CartState>()(
             });
             const data = await res.json();
 
-            // 🛡️ FINAL CHECK: Ensure no edits happened DURING the network request
+            // 🛡️ FRESH STATE: MUST read latest state after network call (never rely on stale pre-fetch state)
             const latestState = get();
-            if (latestState.lastLocalUpdate[currentContext] > fetchStartTime) {
-              if (__DEV__) console.log(`🛡️ [TRACE] [${now}] [${currentContext}] fetchCartFromDB: ABORTED (Newer local edit detected during fetch)`);
-              return;
-            }
-
-            const rawItems = Array.isArray(data) ? data : (data.items || []);
-            const orderId = data.currentOrderId || null;
-
-            const dbItems = rawItems.map((item: any) => normalizeCartItem(item));
 
             // 🚀 SMART CONTEXT MATCHING: Find the context associated with this table
-            let resolvedContextId = state.currentContextId;
-            const currentOrder = useOrderContextStore.getState().currentOrder;
+            let resolvedContextId = latestState.currentContextId;
+            const latestOrder = useOrderContextStore.getState().currentOrder;
 
             // 1. If this table matches the currently open order
-            if (currentOrder?.tableId === tableId && resolvedContextId) {
-              // resolvedContextId is correct
+            if (latestOrder?.tableId === tableId) {
+              resolvedContextId = getContextId(latestOrder) || resolvedContextId;
             } else {
               // 2. Try to find the context in ActiveOrders
               const { useActiveOrdersStore } = require("./activeOrdersStore");
@@ -1412,8 +1443,8 @@ export const useCartStore = create<CartState>()(
                 resolvedContextId = getContextId(activeOrder.context);
               } else {
                 // 3. Fallback: Search all existing cart keys
-                const allContexts = Object.keys(state.carts);
-                resolvedContextId = allContexts.find(ctx => ctx.includes(tableId)) || null;
+                const allContexts = Object.keys(latestState.carts);
+                resolvedContextId = allContexts.find(ctx => ctx.includes(tableId)) || resolvedContextId;
               }
             }
 
@@ -1421,15 +1452,28 @@ export const useCartStore = create<CartState>()(
               return;
             }
 
-            // 🚀 SAFETY MERGE: Never let the server clear local "NEW" or recently "SENT" items
-            // Also, strictly filter out items that are currently in the Deletion Shield.
-            const currentLocalCart = state.carts[resolvedContextId] || [];
+            // 🛡️ CRITICAL ABORT: Ensure no local edits occurred during the network fetch
+            const lastLocal = Math.max(
+              latestState.lastLocalUpdate[resolvedContextId] || 0,
+              latestState.lastLocalUpdate[tableId] || 0
+            );
+            if (lastLocal > fetchStartTime) {
+              if (__DEV__) console.log(`🛡️ [TRACE] [${Date.now()}] [${resolvedContextId}] fetchCartFromDB: ABORTED (Newer local edit detected during fetch)`);
+              return;
+            }
+
+            const rawItems = Array.isArray(data) ? data : (data.items || []);
+            const orderId = data.currentOrderId || null;
+            const dbItems = rawItems.map((item: any) => normalizeCartItem(item));
+
+            // 🚀 SAFETY MERGE: Read FRESH local cart from latestState
+            const currentLocalCart = latestState.carts[resolvedContextId] || [];
             const localPendingItems = currentLocalCart.filter(item => {
                const isPending = item.status === "NEW" || !item.status || item.status === "SENT";
                return isPending;
             });
             
-            const { deletedItemsShield } = state;
+            const { deletedItemsShield } = latestState;
 
             // 🛡️ DELETION SHIELD FILTER: Remove items that were explicitly deleted locally
             const filteredDbItems = dbItems.filter((dbItem: CartItem) => {
@@ -1445,13 +1489,10 @@ export const useCartStore = create<CartState>()(
             const mergedItems = filteredDbItems.map((dbItem: CartItem) => {
               const localMatch = localPendingItems.find(li => li.lineItemId === dbItem.lineItemId);
               
-              // 🛡️ SYNC SHIELD: If we have a local version that was modified recently,
-              // we MUST preserve the local Qty/Note/TW even for SENT items.
-              const timeSinceLastEdit = now - (state.lastLocalUpdate[resolvedContextId!] || 0);
-              const isRecentlyEdited = timeSinceLastEdit < 12000; // 🛡️ Increased to 12s to shield latency on slower connections
+              const timeSinceLastEdit = now - (latestState.lastLocalUpdate[resolvedContextId!] || 0);
+              const isRecentlyEdited = timeSinceLastEdit < 12000;
 
               if (localMatch && (localMatch.status === 'NEW' || !localMatch.status || isRecentlyEdited)) {
-                // Determine the most "advanced" status (SENT is more advanced than NEW)
                 const isSent = localMatch.status === 'SENT' || dbItem.status === 'SENT' || !!localMatch.sent;
                 
                 const finalStatus = (dbItem.status === 'READY' || dbItem.status === 'SERVED' || dbItem.status === 'VOIDED' || dbItem.status === 'HOLD')
@@ -1507,23 +1548,49 @@ export const useCartStore = create<CartState>()(
 
             if (__DEV__) console.log(`[TRACE] [${Date.now()}] [${resolvedContextId}] fetchCartFromDB: APPLYING | Items: ${mergedItems.length}`);
 
-            set((state) => {
+            set((currentState) => {
+              // 🚀 ABSOLUTE LOCAL DEFENSE: Only preserve items that were TRULY added locally
+              // by the user DURING this network fetch (DateCreated >= fetchStartTime)
+              // AND do not already exist on the server (same lineItemId OR same dish id + mods)
+              const activeLocalCart = currentState.carts[resolvedContextId!] || [];
+              const newlyAddedItems = activeLocalCart.filter(item => {
+                if (item.status !== 'NEW' && item.status) return false;
+                
+                const itemTime = typeof item.DateCreated === 'number' ? item.DateCreated : new Date(item.DateCreated || 0).getTime();
+                if (itemTime < fetchStartTime) return false;
+
+                const alreadyMerged = mergedItems.some((mi: any) => {
+                  if (mi.lineItemId === item.lineItemId) return true;
+                  if (mi.id === item.id && getModifierKey(mi.modifiers) === getModifierKey(item.modifiers)) {
+                    if (isOpenPriceItem(mi) || isOpenPriceItem(item)) {
+                      return mi.price === item.price;
+                    }
+                    return true;
+                  }
+                  return false;
+                });
+
+                return !alreadyMerged;
+              });
+              const finalMerged = [...mergedItems, ...newlyAddedItems];
+
               const newQtyMap: Record<string, number> = {};
-              mergedItems.forEach((item: CartItem) => {
+              finalMerged.forEach((item: CartItem) => {
                 newQtyMap[item.id] = (newQtyMap[item.id] || 0) + item.qty;
               });
+
               return {
-                carts: { ...state.carts, [resolvedContextId!]: mergedItems },
-                cartQtyMap: { ...state.cartQtyMap, [resolvedContextId!]: newQtyMap },
-                tableOrderIds: { ...state.tableOrderIds, [tableId]: orderId },
-                lastServerSync: { ...state.lastServerSync, [resolvedContextId!]: Date.now() },
+                carts: { ...currentState.carts, [resolvedContextId!]: finalMerged },
+                cartQtyMap: { ...currentState.cartQtyMap, [resolvedContextId!]: newQtyMap },
+                tableOrderIds: { ...currentState.tableOrderIds, [tableId]: orderId },
+                lastServerSync: { ...currentState.lastServerSync, [resolvedContextId!]: Date.now() },
                 pendingSync: false
               };
             });
           } catch (err) {
             console.error("❌ [CartStore] Fetch failed:", err);
           }
-        }, 100); // 🚀 FASTER FETCH: Reduced from 300ms
+        }, 100);
         
         set({ _fetchTimeout: timeout } as any);
       },

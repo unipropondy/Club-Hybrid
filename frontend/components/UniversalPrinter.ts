@@ -2254,7 +2254,7 @@ class UniversalPrinter {
       text += "[C]<B>*** PLEASE PAY AT THE COUNTER ***</B>\n";
     }
     text += "[C]<B>THANK YOU! COME AGAIN!</B>\n";
-    text += "[C]SMART-CLUB BY UNIPR0SG\n\n\n\n";
+    text += "[C]SMART-CLUB BY UNIPR0SG\n";
 
     return text;
   }

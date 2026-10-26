@@ -2,6 +2,52 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
+import { getApiUrl } from "../constants/Config";
+
+/* ================= HEARTBEAT SERVICE ================= */
+let heartbeatTimer: any = null;
+
+export const startHeartbeat = () => {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+
+  const sendPing = async () => {
+    try {
+      const state = useAuthStore.getState();
+      if (!state.isLoggedIn || !state.user || !state.sessionId) return;
+
+      const activeApi = getApiUrl();
+      const res = await fetch(`${activeApi}/api/auth/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: state.user.userId || (state.user as any).id,
+          sessionId: state.sessionId,
+        }),
+      });
+
+      if (res.status === 401) {
+        const data = await res.json().catch(() => ({}));
+        if (data.sessionRevoked) {
+          console.warn("[AuthHeartbeat] Active session revoked or superseded. Logging out.");
+          state.logout();
+        }
+      }
+    } catch {
+      // Ignore network blip / offline fluctuation
+    }
+  };
+
+  // Ping every 45s (keeps session well within the 5-minute / 300s expiration)
+  heartbeatTimer = setInterval(sendPing, 45000);
+  sendPing();
+};
+
+export const stopHeartbeat = () => {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+};
 
 /* ================= TYPES ================= */
 
@@ -63,8 +109,9 @@ export type AuthState = {
   permissions: PermissionsMap;
   permissionsLoaded: boolean;
   token: string | null;
+  sessionId: string | null;
 
-  setUser: (user: AuthUser, token?: string, loginDate?: string | null) => void;
+  setUser: (user: AuthUser, token?: string, loginDate?: string | null, sessionId?: string | null) => void;
   setPermissions: (permissions: PermissionsMap) => void;
   logout: () => void;
 
@@ -106,26 +153,50 @@ export const useAuthStore = create<AuthState>()(
       permissions: {},
       permissionsLoaded: false,
       token: null,
+      sessionId: null,
 
-      setUser: (user, token, loginDate) =>
+      setUser: (user, token, loginDate, sessionId) => {
         set({
           user,
           token: token || null,
+          sessionId: sessionId || null,
           isLoggedIn: true,
           loginDate: loginDate || new Date().toISOString().split("T")[0],
-        }),
+        });
+        startHeartbeat();
+      },
 
       setPermissions: (permissions) => set({ permissions, permissionsLoaded: true }),
 
-      logout: () =>
+      logout: () => {
+        const { user, sessionId } = get();
+        stopHeartbeat();
+
+        // Release session lock from backend immediately
+        if (user && sessionId) {
+          try {
+            const activeApi = getApiUrl();
+            fetch(`${activeApi}/api/auth/logout`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                userId: user.userId || (user as any).id,
+                sessionId: sessionId,
+              }),
+            }).catch(() => {});
+          } catch {}
+        }
+
         set({
           user: null,
           token: null,
+          sessionId: null,
           isLoggedIn: false,
           permissions: {},
           permissionsLoaded: false,
           loginDate: null,
-        }),
+        });
+      },
 
       /* ─── Low-level: check if user can READ a given FormCode ─── */
       can: (formCode) => {
@@ -186,6 +257,7 @@ export const useAuthStore = create<AuthState>()(
         permissionsLoaded: state.permissionsLoaded,
         token: state.token,
         loginDate: state.loginDate,
+        sessionId: state.sessionId,
       }),
     }
   )

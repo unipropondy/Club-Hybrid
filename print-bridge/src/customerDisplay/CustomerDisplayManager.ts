@@ -43,14 +43,28 @@ export function launchCustomerDisplay() {
     width,
     height,
     frame: false,
-    fullscreen: true,
-    alwaysOnTop: true,
-    acceptFirstMouse: true,
-    skipTaskbar: false,
+    title: 'Smart-Club Customer Display',
+    resizable: false,
+    movable: false,
+    alwaysOnTop: false, // Prevents z-order fighting and window lag when switching apps
+    focusable: true,    // Allows touch/clicks on customer screen without stealing focus (since shown inactive)
+    skipTaskbar: true,  // Hides from Windows taskbar and Alt+Tab switcher
+    show: false,        // Smooth reveal without white flash
+    backgroundColor: '#0C0A22',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false, // Keeps full 60 FPS when cashier is active on primary screen
     },
+  });
+
+  displayWindow.setBounds({ x, y, width, height });
+
+  displayWindow.once('ready-to-show', () => {
+    if (displayWindow && !displayWindow.isDestroyed()) {
+      displayWindow.showInactive();
+      logger.info('[CustomerDisplay] Window displayed smoothly on secondary monitor (inactive mode).');
+    }
   });
 
   const uiPath = getUIPath();
@@ -113,6 +127,24 @@ export function closeCustomerDisplay() {
   }
   displayWindow = null;
   logger.info('[CustomerDisplay] Window closed.');
+}
+
+/**
+ * Updates or re-aligns the customer display window bounds to the current secondary display.
+ */
+export function updateCustomerDisplayBounds() {
+  const secondary = getSecondaryDisplay();
+  if (!secondary) {
+    closeCustomerDisplay();
+    return;
+  }
+  if (displayWindow && !displayWindow.isDestroyed()) {
+    const { x, y, width, height } = secondary.bounds;
+    displayWindow.setBounds({ x, y, width, height });
+    logger.info(`[CustomerDisplay] Re-aligned window bounds to secondary display: ${width}x${height} at (${x}, ${y})`);
+  } else {
+    launchCustomerDisplay();
+  }
 }
 
 /**

@@ -304,7 +304,10 @@ router.imageCache = imageCache;
 
 router.get("/image/:imageId", async (req, res) => {
   try {
-    const imageId = req.params.imageId;
+    const imageId = (req.params.imageId || "").trim();
+    if (!imageId || imageId === "null" || imageId === "undefined") {
+      return res.status(404).send("Image not found");
+    }
 
     // Serve from cache if available
     const cachedBuffer = imageCache.get(imageId);
@@ -319,7 +322,7 @@ router.get("/image/:imageId", async (req, res) => {
     const result = await pool
       .request()
       .input("Imageid", imageId)
-      .query(`SELECT ImageData FROM ImageList WHERE Imageid = @Imageid`);
+      .query(`SELECT TOP 1 ImageData FROM ImageList WHERE CAST(Imageid AS VARCHAR(50)) = @Imageid OR ImageName = @Imageid`);
 
     if (result.recordset.length > 0 && result.recordset[0].ImageData) {
       let buffer = result.recordset[0].ImageData;

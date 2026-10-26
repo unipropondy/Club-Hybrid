@@ -328,6 +328,7 @@ export const CustomerDisplaySync = {
         terminalCode: getTerminalCode(), // 🖥️ Room routing key
         companyName: companySettings?.name || paymentSettings?.shopName || "Restaurant",
         currencySymbol: companySettings?.currencySymbol || "₹",
+        items: [],
       };
 
       console.log("🖥️ [CustomerDisplaySync] Emitting payment success:", params.orderId, "| Terminal:", getTerminalCode());

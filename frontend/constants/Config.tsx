@@ -23,6 +23,10 @@ export const localIP = getLocalBackendIP();
 
 const calculateInitialUrl = (): string => {
   if (Platform.OS === "web" && typeof window !== "undefined") {
+    // When served via Metro bundler dev server (8081, 8082, 19006), Express backend is on port 5000
+    if (window.location.port === "8081" || window.location.port === "8082" || window.location.port === "19006") {
+      return `${window.location.protocol}//${window.location.hostname}:5000`;
+    }
     return `${window.location.protocol}//${window.location.hostname}${window.location.port ? `:${window.location.port}` : ""}`;
   }
 

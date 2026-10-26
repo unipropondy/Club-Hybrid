@@ -1993,7 +1993,7 @@ const fetchDayHistory = async () => {
       }
       text += lineEq;
       text += "[C]SMART-CLUB BY UNIPR0SG\n";
-      text += lineEq + "\n\n\n\n";
+      text += lineEq + "\n";
 
       if (Platform.OS === 'web') {
         try {
